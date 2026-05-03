@@ -121,6 +121,77 @@ const fn seat_scale_for_team_count(team_count: usize) -> u64 {
 
 // ================================================================
 
+struct CliArgs {
+    file_path: String,
+    allow_no_results: bool,
+}
+
+fn parse_args() -> Result<CliArgs, AppError> {
+    let mut args = env::args();
+    let program_name = args
+        .next()
+        .unwrap_or_else(|| "ipl-playoff-calculator".to_string());
+
+    let mut file_path: Option<String> = None;
+    let mut allow_no_results = false;
+
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print_usage(&program_name);
+                std::process::exit(0);
+            }
+            "--allow-no-results" => {
+                allow_no_results = true;
+            }
+            _ if arg.starts_with('-') => {
+                return Err(AppError::Parse(format!("Unknown flag: {}", arg)));
+            }
+            _ => {
+                if file_path.is_some() {
+                    return Err(AppError::Parse(
+                        "Expected exactly one matches file path".to_string(),
+                    ));
+                }
+                file_path = Some(arg);
+            }
+        }
+    }
+
+    let file_path = file_path.ok_or_else(|| {
+        AppError::Parse("Missing matches file path. Use --help for usage.".to_string())
+    })?;
+
+    Ok(CliArgs {
+        file_path,
+        allow_no_results,
+    })
+}
+
+struct TableLayout {
+    team_w: usize,
+    pos_w: usize,
+    stat_w: usize,
+    pct_w: usize,
+}
+
+fn table_layout(parsed: &ParsedInput) -> TableLayout {
+    TableLayout {
+        team_w: parsed
+            .team_names
+            .iter()
+            .map(|name| name.len())
+            .max()
+            .unwrap_or(6)
+            .max(6),
+        pos_w: 8,
+        stat_w: 4,
+        pct_w: 20,
+    }
+}
+
+// ================================================================
+
 #[derive(Clone, Copy, Default, Debug)]
 struct Counts {
     top2_pts: [u64; MAX_TEAMS],
@@ -590,7 +661,7 @@ fn fmt_scaled_pct(units: u64, total_scenarios: u64, seat_scale: u64) -> String {
 fn print_usage(program_name: &str) {
     eprintln!("{BOLD}{CYAN}IPL Playoff Calculator{RESET}\n");
     eprintln!(
-        "{BOLD}{YELLOW}Usage:{RESET} {} <matches_file> [--allow-no-results]",
+        "{BOLD}{YELLOW}Usage:{RESET} {} [--allow-no-results] <matches_file>",
         program_name
     );
     eprintln!("\n{BOLD}Arguments:{RESET}");
@@ -608,12 +679,55 @@ fn print_usage(program_name: &str) {
     eprintln!("  MI vs DC          # Upcoming match\n");
 }
 
+fn print_current_standings(parsed: &ParsedInput, layout: &TableLayout, c: &Colors) {
+    println!(
+        "{}=========== Current Standings ==========={}",
+        c.cyan, c.reset
+    );
+    println!(
+        "{}{:>pos_w$}  {:<team_w$} {:>stat_w$} {:>stat_w$} {:>stat_w$} {:>stat_w$} {:>stat_w$}{}",
+        c.yellow,
+        "Position",
+        "Team",
+        "M",
+        "W",
+        "L",
+        "NR",
+        "Pts",
+        c.reset,
+        pos_w = layout.pos_w,
+        team_w = layout.team_w,
+        stat_w = layout.stat_w,
+    );
+
+    let current_order = sort_teams(parsed.team_count, &parsed.points, &parsed.wins);
+    for (idx, &i) in current_order.iter().take(parsed.team_count).enumerate() {
+        println!(
+            "{:>pos_w$}  {}{:<team_w$}{} {:>stat_w$} {:>stat_w$} {:>stat_w$} {:>stat_w$} {}{:>stat_w$}{}",
+            idx + 1,
+            c.green,
+            parsed.team_names[i],
+            c.reset,
+            parsed.matches_played[i],
+            parsed.wins[i],
+            parsed.losses[i],
+            parsed.no_results[i],
+            c.bold,
+            parsed.points[i],
+            c.reset,
+            pos_w = layout.pos_w,
+            team_w = layout.team_w,
+            stat_w = layout.stat_w,
+        );
+    }
+}
+
 fn print_results(
     parsed: &ParsedInput,
     total_counts: &Counts,
     total_scenarios: u64,
     seat_scale: u64,
-    name_col_width: usize,
+    layout: &TableLayout,
     c: &Colors,
 ) {
     let mut rows: Vec<Row> = (0..parsed.team_count)
@@ -636,7 +750,7 @@ fn print_results(
     });
 
     println!(
-        "{}{:<width$} {:>14} {:>20} {:>14} {:>20}{}",
+        "{}{:<team_w$} {:>pct_w$} {:>pct_w$} {:>pct_w$} {:>pct_w$}{}",
         c.yellow,
         "Team",
         "Top 2 Pts",
@@ -644,12 +758,13 @@ fn print_results(
         "Top 4 Pts",
         "Top 4 Pts+Good NRR",
         c.reset,
-        width = name_col_width
+        team_w = layout.team_w,
+        pct_w = layout.pct_w,
     );
 
     for row in rows {
         println!(
-            "{}{:<width$}{} {:>14} {:>20} {:>14} {:>20}",
+            "{}{:<team_w$}{} {:>pct_w$} {:>pct_w$} {:>pct_w$} {:>pct_w$}",
             c.green,
             row.team,
             c.reset,
@@ -657,33 +772,26 @@ fn print_results(
             fmt_scaled_pct(row.top2_good_nrr_units, total_scenarios, seat_scale),
             fmt_pct(row.top4_pts, total_scenarios),
             fmt_scaled_pct(row.top4_good_nrr_units, total_scenarios, seat_scale),
-            width = name_col_width
+            team_w = layout.team_w,
+            pct_w = layout.pct_w,
         );
     }
 }
 
 fn run() -> Result<(), AppError> {
-    let args: Vec<String> = env::args().collect();
+    let cli = parse_args()?;
+    let interactive = io::stdout().is_terminal();
+    let c = Colors::new(interactive);
 
-    if args.len() < 2 || args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_usage(&args[0]);
-        std::process::exit(1);
-    }
-
-    let file_path = &args[1];
-    let allow_no_results = args.iter().any(|arg| arg == "--allow-no-results");
-
-    // Detect TTY: suppress ANSI codes when stdout is piped/redirected
-    let c = Colors::new(io::stdout().is_terminal());
-
-    let matches_input = fs::read_to_string(file_path)
-        .map_err(|e| AppError::Parse(format!("Error reading file '{}': {}", file_path, e)))?;
+    let matches_input = fs::read_to_string(&cli.file_path)
+        .map_err(|e| AppError::Parse(format!("Error reading file '{}': {}", cli.file_path, e)))?;
 
     let parsed = parse_inputs(&matches_input)?;
     let team_count = parsed.team_count;
     let seat_scale = parsed.seat_scale;
+    let layout = table_layout(&parsed);
 
-    let base = if allow_no_results { 3u64 } else { 2u64 };
+    let base = if cli.allow_no_results { 3u64 } else { 2u64 };
     let total_scenarios = pow_u64(base, parsed.matches.len())?;
     let num_threads = thread::available_parallelism()
         .map(|p| p.get())
@@ -707,57 +815,13 @@ fn run() -> Result<(), AppError> {
         0,
         split_depth,
         &parsed.matches,
-        allow_no_results,
+        cli.allow_no_results,
         &mut points,
         &mut wins,
         &mut tasks,
     );
 
-    // Compute dynamic column width from the longest team name
-    let name_col_width = parsed
-        .team_names
-        .iter()
-        .map(|n| n.len())
-        .max()
-        .unwrap_or(6)
-        .max(6);
-
-    println!(
-        "{}=========== Current Standings ==========={}",
-        c.cyan, c.reset
-    );
-    println!(
-        "{}{:>8} {:<width$} {:>4} {:>4} {:>4} {:>4} {:>4}{}",
-        c.yellow,
-        "Position",
-        "Team",
-        "M",
-        "W",
-        "L",
-        "NR",
-        "Pts",
-        c.reset,
-        width = name_col_width
-    );
-
-    let current_order = sort_teams(team_count, &parsed.points, &parsed.wins);
-    for (idx, &i) in current_order.iter().take(team_count).enumerate() {
-        println!(
-            "{:>8} {}{:<width$}{} {:>4} {:>4} {:>4} {:>4} {}{:>4}{}",
-            idx + 1,
-            c.green,
-            parsed.team_names[i],
-            c.reset,
-            parsed.matches_played[i],
-            parsed.wins[i],
-            parsed.losses[i],
-            parsed.no_results[i],
-            c.bold,
-            parsed.points[i],
-            c.reset,
-            width = name_col_width
-        );
-    }
+    print_current_standings(&parsed, &layout, &c);
 
     println!();
     println!(
@@ -801,7 +865,7 @@ fn run() -> Result<(), AppError> {
             &final_counts,
             total_scenarios,
             seat_scale,
-            name_col_width,
+            &layout,
             &c,
         );
         return Ok(());
@@ -822,6 +886,7 @@ fn run() -> Result<(), AppError> {
         let tasks_clone = Arc::clone(&tasks_arc);
         let matches_clone = Arc::clone(&matches_arc);
         let tx_clone = tx.clone();
+        let allow_no_results = cli.allow_no_results;
 
         let handle = thread::spawn(move || -> Counts {
             let mut local = Counts::default();
@@ -830,6 +895,7 @@ fn run() -> Result<(), AppError> {
                 if idx >= tasks_clone.len() {
                     break;
                 }
+
                 let task = &tasks_clone[idx];
                 let mut local_points = task.points;
                 let mut local_wins = task.wins;
@@ -859,44 +925,47 @@ fn run() -> Result<(), AppError> {
     let mut completed_tasks = 0usize;
     for _ in rx {
         completed_tasks += 1;
-        let elapsed = start_time.elapsed().as_secs_f64();
-        let pct = completed_tasks as f64 / total_tasks as f64;
-        let eta = if pct > 0.0 {
-            (elapsed / pct) - elapsed
-        } else {
-            0.0
-        };
 
-        let bar_width = 40;
-        let filled = (pct * bar_width as f64) as usize;
-        let bar: String = (0..bar_width)
-            .map(|i| {
-                if i < filled {
-                    '='
-                } else if i == filled {
-                    '>'
-                } else {
-                    ' '
-                }
-            })
-            .collect();
+        if interactive {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let pct = completed_tasks as f64 / total_tasks as f64;
+            let eta = if pct > 0.0 {
+                (elapsed / pct) - elapsed
+            } else {
+                0.0
+            };
 
-        print!(
-            "\r{}Progress:{} [{}] {}{:>5.1}%{} | {}Elapsed:{} {:>5.1}s | {}ETA:{} {:>5.1}s ",
-            c.cyan,
-            c.reset,
-            bar,
-            c.bold,
-            pct * 100.0,
-            c.reset,
-            c.yellow,
-            c.reset,
-            elapsed,
-            c.green,
-            c.reset,
-            eta
-        );
-        io::stdout().flush().unwrap();
+            let bar_width = 40;
+            let filled = (pct * bar_width as f64) as usize;
+            let bar: String = (0..bar_width)
+                .map(|i| {
+                    if i < filled {
+                        '='
+                    } else if i == filled {
+                        '>'
+                    } else {
+                        ' '
+                    }
+                })
+                .collect();
+
+            print!(
+                "\r{}Progress:{} [{}] {}{:>5.1}%{} | {}Elapsed:{} {:>5.1}s | {}ETA:{} {:>5.1}s ",
+                c.cyan,
+                c.reset,
+                bar,
+                c.bold,
+                pct * 100.0,
+                c.reset,
+                c.yellow,
+                c.reset,
+                elapsed,
+                c.green,
+                c.reset,
+                eta
+            );
+            io::stdout().flush().unwrap();
+        }
     }
 
     println!("\n");
@@ -919,7 +988,7 @@ fn run() -> Result<(), AppError> {
         &total_counts,
         total_scenarios,
         seat_scale,
-        name_col_width,
+        &layout,
         &c,
     );
 
