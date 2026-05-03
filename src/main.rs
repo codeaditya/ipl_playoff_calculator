@@ -837,6 +837,98 @@ impl Simulator {
 }
 
 // ================================================================
+// NEXT MATCH OUTCOME SIMULATION
+// ================================================================
+
+#[derive(Clone, Copy)]
+enum NextMatchOutcome {
+    TeamAWin,
+    TeamBWin,
+    NoResult,
+}
+
+impl NextMatchOutcome {
+    fn title(self, a_name: &str, b_name: &str) -> String {
+        match self {
+            NextMatchOutcome::TeamAWin => format!("If {} beats {}", a_name, b_name),
+            NextMatchOutcome::TeamBWin => format!("If {} beats {}", b_name, a_name),
+            NextMatchOutcome::NoResult => format!("If {} vs {} ends in NR", a_name, b_name),
+        }
+    }
+}
+
+fn conditioned_input_for_next_match(
+    parsed: &ParsedInput,
+    outcome: NextMatchOutcome,
+) -> Result<ParsedInput, AppError> {
+    let (a, b) = parsed
+        .matches
+        .first()
+        .copied()
+        .ok_or_else(|| AppError::Parse("No remaining matches available".to_string()))?;
+
+    let mut conditioned = parsed.clone();
+    conditioned.matches = parsed.matches[1..].to_vec();
+    conditioned.completed_matches += 1;
+    conditioned.matches_played[a] += 1;
+    conditioned.matches_played[b] += 1;
+
+    match outcome {
+        NextMatchOutcome::TeamAWin => {
+            conditioned.initial_state.record_win(a);
+            conditioned.losses[b] += 1;
+        }
+        NextMatchOutcome::TeamBWin => {
+            conditioned.initial_state.record_win(b);
+            conditioned.losses[a] += 1;
+        }
+        NextMatchOutcome::NoResult => {
+            conditioned.initial_state.record_no_result(a, b);
+            conditioned.no_results[a] += 1;
+            conditioned.no_results[b] += 1;
+        }
+    }
+
+    Ok(conditioned)
+}
+
+fn simulate_next_match_outcome(
+    parsed: &ParsedInput,
+    allow_no_results: bool,
+    outcome: NextMatchOutcome,
+    num_threads: usize,
+    reporter: &Reporter,
+) -> Result<(), AppError> {
+    let conditioned = conditioned_input_for_next_match(parsed, outcome)?;
+    let simulator = Simulator::new(&conditioned, allow_no_results);
+    let total_scenarios = simulator.total_scenarios()?;
+
+    let (a, b) = parsed.matches[0];
+    let title = outcome.title(&parsed.team_names[a], &parsed.team_names[b]);
+
+    reporter.print_next_match_scenario_heading(&title);
+
+    let counts = simulate_all(
+        &conditioned,
+        &simulator,
+        num_threads,
+        false, // keep the extra tables quiet; set to true if you want progress here too
+        reporter.colors(),
+        total_scenarios,
+    )?;
+
+    reporter.print_results(
+        &conditioned,
+        &counts,
+        total_scenarios,
+        conditioned.seat_scale,
+    );
+    println!();
+
+    Ok(())
+}
+
+// ================================================================
 // PROGRESS
 // ================================================================
 
@@ -1055,16 +1147,34 @@ impl Reporter {
         &self.colors
     }
 
+    fn standings_table_width(&self) -> usize {
+        // pos_w + team_w + 5 stats columns + 6 space separators
+        self.layout.pos_w + self.layout.team_w + (5 * self.layout.stat_w) + 6
+    }
+
+    fn probabilities_table_width(&self) -> usize {
+        // team_w + 4 pct columns + 5 space separators
+        self.layout.pos_w + self.layout.team_w + (4 * self.layout.pct_w) + 5
+    }
+
     fn print_current_standings(&self, parsed: &ParsedInput) {
+        let heading_text = format!(
+            "========= Current Standings after Match {} =========",
+            parsed.completed_matches
+        );
+        let table_width = self.standings_table_width();
         println!(
-            "{}=========== Current Standings ==========={}",
-            self.colors.cyan, self.colors.reset
+            "{}{:^width$}{}",
+            self.colors.cyan,
+            heading_text,
+            self.colors.reset,
+            width = table_width
         );
 
         println!(
             "{}{:>pos_w$} {:team_w$} {:>stat_w$} {:>stat_w$} {:>stat_w$} {:>stat_w$} {:>stat_w$}{}",
             self.colors.yellow,
-            "Position",
+            "",
             "Team",
             "M",
             "W",
@@ -1112,32 +1222,80 @@ impl Reporter {
     ) {
         println!();
         println!(
-            "{}========= Playoff Probabilities ========={}",
+            "{}========= League Status ========={}",
             self.colors.cyan, self.colors.reset
         );
         println!(
-            "{}Completed matches:{} {}",
+            "    {}Matches Completed :{} {}",
             self.colors.magenta, self.colors.reset, completed_matches
         );
         println!(
-            "{}Remaining matches:{} {}",
+            "    {}Matches Remaining:{} {}",
             self.colors.magenta, self.colors.reset, remaining_matches
         );
         println!(
-            "{}Outcome mode:{} {} per match",
+            "    {}Outcome Mode:{} {} per match",
             self.colors.magenta, self.colors.reset, base
         );
         println!(
-            "{}Total scenarios:{} {}",
+            "    {}Total Scenarios:{} {}",
             self.colors.magenta,
             self.colors.reset,
             format_with_commas(total_scenarios)
         );
         println!(
-            "{}Threads:{} {}",
+            "    {}Threads:{} {}",
             self.colors.magenta, self.colors.reset, num_threads
         );
         println!();
+    }
+
+    fn print_current_probabilities_heading(&self, parsed: &ParsedInput) {
+        let heading_text = format!(
+            "========= Current Probabilities after Match {} =========",
+            parsed.completed_matches
+        );
+        let table_width = self.probabilities_table_width();
+
+        println!(
+            "{}{:^width$}{}",
+            self.colors.cyan,
+            heading_text,
+            self.colors.reset,
+            width = table_width
+        );
+    }
+
+    fn print_next_match_impact_heading(&self, parsed: &ParsedInput) {
+        if let Some(&(a, b)) = parsed.matches.first() {
+            let heading_text = format!(
+                "========= Impact of Next Match {}: {} vs {} =========",
+                parsed.completed_matches + 1,
+                parsed.team_names[a],
+                parsed.team_names[b]
+            );
+            let table_width = self.probabilities_table_width();
+
+            println!(
+                "{}{:^width$}{}\n",
+                self.colors.magenta,
+                heading_text,
+                self.colors.reset,
+                width = table_width
+            );
+        }
+    }
+
+    fn print_next_match_scenario_heading(&self, title: &str) {
+        let heading_text = format!("========= {} =========", title);
+        let table_width = self.probabilities_table_width();
+        println!(
+            "{}{:^width$}{}",
+            self.colors.cyan,
+            heading_text,
+            self.colors.reset,
+            width = table_width
+        );
     }
 
     fn print_results(
@@ -1167,7 +1325,8 @@ impl Reporter {
         });
 
         println!(
-            "{}{:team_w$} {:>pct_w$} {:>pct_w$} {:>pct_w$} {:>pct_w$}{}",
+            "{:>pos_w$} {}{:team_w$} {:>pct_w$} {:>pct_w$} {:>pct_w$} {:>pct_w$}{}",
+            "",
             self.colors.yellow,
             "Team",
             "Top 2 Pts",
@@ -1175,13 +1334,15 @@ impl Reporter {
             "Top 4 Pts",
             "Top 4 Pts+Good NRR",
             self.colors.reset,
+            pos_w = self.layout.pos_w,
             team_w = self.layout.team_w,
             pct_w = self.layout.pct_w,
         );
 
         for row in rows {
             println!(
-                "{}{:team_w$}{} {:>pct_w$} {:>pct_w$} {:>pct_w$} {:>pct_w$}",
+                "{:>pos_w$} {}{:team_w$}{} {:>pct_w$} {:>pct_w$} {:>pct_w$} {:>pct_w$}",
+                "",
                 self.colors.green,
                 row.team,
                 self.colors.reset,
@@ -1189,6 +1350,7 @@ impl Reporter {
                 fmt_scaled_pct(row.top2_good_nrr_units, total_scenarios, seat_scale),
                 fmt_pct(row.top4_pts, total_scenarios),
                 fmt_scaled_pct(row.top4_good_nrr_units, total_scenarios, seat_scale),
+                pos_w = self.layout.pos_w,
                 team_w = self.layout.team_w,
                 pct_w = self.layout.pct_w,
             );
@@ -1211,12 +1373,20 @@ fn format_with_commas(n: u64) -> String {
 }
 
 fn fmt_pct(numerator: u64, denominator: u64) -> String {
-    format!("{:.4}%", numerator as f64 * 100.0 / denominator as f64)
+    if numerator == 0 {
+        "-".to_string()
+    } else {
+        format!("{:.2}%", numerator as f64 * 100.0 / denominator as f64)
+    }
 }
 
 fn fmt_scaled_pct(units: u64, total_scenarios: u64, seat_scale: u64) -> String {
-    let denom = (total_scenarios as f64) * (seat_scale as f64);
-    format!("{:.4}%", (units as f64) * 100.0 / denom)
+    if units == 0 {
+        "-".to_string()
+    } else {
+        let denom = (total_scenarios as f64) * (seat_scale as f64);
+        format!("{:.2}%", (units as f64) * 100.0 / denom)
+    }
 }
 
 // ================================================================
@@ -1286,7 +1456,40 @@ fn run() -> Result<(), AppError> {
         total_scenarios,
     )?;
 
+    reporter.print_current_probabilities_heading(&parsed);
     reporter.print_results(&parsed, &total_counts, total_scenarios, parsed.seat_scale);
+
+    if !parsed.matches.is_empty() {
+        println!();
+        reporter.print_next_match_impact_heading(&parsed);
+
+        simulate_next_match_outcome(
+            &parsed,
+            cli.allow_no_results,
+            NextMatchOutcome::TeamAWin,
+            num_threads,
+            &reporter,
+        )?;
+
+        simulate_next_match_outcome(
+            &parsed,
+            cli.allow_no_results,
+            NextMatchOutcome::TeamBWin,
+            num_threads,
+            &reporter,
+        )?;
+
+        if cli.allow_no_results {
+            simulate_next_match_outcome(
+                &parsed,
+                cli.allow_no_results,
+                NextMatchOutcome::NoResult,
+                num_threads,
+                &reporter,
+            )?;
+        }
+    }
+
     Ok(())
 }
 
