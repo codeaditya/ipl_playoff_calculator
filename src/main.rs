@@ -1,12 +1,13 @@
-use std::env;
-use std::fs;
 use std::collections::HashMap;
+use std::env;
 use std::fmt;
+use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::ops::AddAssign;
 use std::sync::Arc;
-use std::thread;
-use std::io::{self, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::thread;
 use std::time::Instant;
 
 // ================================================================
@@ -19,6 +20,42 @@ const CYAN: &str = "\x1b[36m";
 const YELLOW: &str = "\x1b[33m";
 const GREEN: &str = "\x1b[32m";
 const MAGENTA: &str = "\x1b[35m";
+
+// Sentinel used when colors are disabled (stdout is not a TTY)
+const NO_COLOR: &str = "";
+
+struct Colors {
+    bold: &'static str,
+    reset: &'static str,
+    cyan: &'static str,
+    yellow: &'static str,
+    green: &'static str,
+    magenta: &'static str,
+}
+
+impl Colors {
+    fn new(enabled: bool) -> Self {
+        if enabled {
+            Colors {
+                bold: BOLD,
+                reset: RESET,
+                cyan: CYAN,
+                yellow: YELLOW,
+                green: GREEN,
+                magenta: MAGENTA,
+            }
+        } else {
+            Colors {
+                bold: NO_COLOR,
+                reset: NO_COLOR,
+                cyan: NO_COLOR,
+                yellow: NO_COLOR,
+                green: NO_COLOR,
+                magenta: NO_COLOR,
+            }
+        }
+    }
+}
 
 // ================================================================
 
@@ -151,13 +188,22 @@ fn canonical(name: &str) -> String {
 fn parse_match_line(line: &str) -> Result<(String, String), AppError> {
     let lower = line.to_ascii_lowercase();
     if let Some(pos) = lower.find(" vs ") {
-        return Ok((line[..pos].trim().to_string(), line[pos + 4..].trim().to_string()));
+        return Ok((
+            line[..pos].trim().to_string(),
+            line[pos + 4..].trim().to_string(),
+        ));
     }
     if let Some(pos) = lower.find(" v ") {
-        return Ok((line[..pos].trim().to_string(), line[pos + 3..].trim().to_string()));
+        return Ok((
+            line[..pos].trim().to_string(),
+            line[pos + 3..].trim().to_string(),
+        ));
     }
     if let Some(pos) = line.find(',') {
-        return Ok((line[..pos].trim().to_string(), line[pos + 1..].trim().to_string()));
+        return Ok((
+            line[..pos].trim().to_string(),
+            line[pos + 1..].trim().to_string(),
+        ));
     }
     Err(AppError::Parse(format!(
         "Invalid match line: '{}'. Expected 'Team A vs Team B'",
@@ -176,7 +222,6 @@ fn parse_inputs(matches_input: &str) -> Result<ParsedInput, AppError> {
     let mut matches = Vec::new();
     let mut completed_matches = 0usize;
 
-    // Helper closure: returns Err if team limit is exceeded
     let mut get_or_insert_team = |name: &str| -> Result<usize, AppError> {
         let key = canonical(name);
         if let Some(&idx) = team_map.get(&key) {
@@ -200,12 +245,20 @@ fn parse_inputs(matches_input: &str) -> Result<ParsedInput, AppError> {
             continue;
         }
 
-        // Use splitn(2, ':') to safely split into at most the match part and outcome part
+        // splitn(2, ':') safely handles colons inside team names or comments
         let mut parts = line.splitn(2, ':');
         let match_part = parts.next().unwrap_or("").trim();
-        let outcome_part = parts.next(); // None if no ':' present
+        let outcome_part = parts.next();
 
         let (a_name, b_name) = parse_match_line(match_part)?;
+
+        // Validate that a match isn't listed against itself
+        if canonical(&a_name) == canonical(&b_name) {
+            return Err(AppError::Parse(format!(
+                "A team cannot play against itself: '{}'",
+                line
+            )));
+        }
 
         let a = get_or_insert_team(&a_name)?;
         let b = get_or_insert_team(&b_name)?;
@@ -231,9 +284,11 @@ fn parse_inputs(matches_input: &str) -> Result<ParsedInput, AppError> {
                 losses[a] += 1;
             } else {
                 return Err(AppError::Parse(format!(
-                    "Invalid outcome '{}' in line '{}'",
+                    "Invalid outcome '{}' in line '{}'. Expected '{}', '{}', or 'NR'",
                     outcome_str.trim(),
-                    line
+                    line,
+                    a_name,
+                    b_name
                 )));
             }
         } else {
@@ -265,7 +320,11 @@ fn pow_u64(base: u64, exp: usize) -> Result<u64, AppError> {
     })
 }
 
-fn sort_teams(team_count: usize, points: &[u8; MAX_TEAMS], wins: &[u8; MAX_TEAMS]) -> [usize; MAX_TEAMS] {
+fn sort_teams(
+    team_count: usize,
+    points: &[u8; MAX_TEAMS],
+    wins: &[u8; MAX_TEAMS],
+) -> [usize; MAX_TEAMS] {
     let mut order = [0usize; MAX_TEAMS];
     for i in 0..team_count {
         order[i] = i;
@@ -358,8 +417,22 @@ fn classify(
 ) {
     let order = sort_teams(team_count, points, wins);
     let (groups, group_count) = build_groups(&order, team_count, points, wins);
-    apply_cutoff(&groups, group_count, 2, seat_scale, &mut counts.top2_pts, &mut counts.top2_good_nrr_units);
-    apply_cutoff(&groups, group_count, 4, seat_scale, &mut counts.top4_pts, &mut counts.top4_good_nrr_units);
+    apply_cutoff(
+        &groups,
+        group_count,
+        2,
+        seat_scale,
+        &mut counts.top2_pts,
+        &mut counts.top2_good_nrr_units,
+    );
+    apply_cutoff(
+        &groups,
+        group_count,
+        4,
+        seat_scale,
+        &mut counts.top4_pts,
+        &mut counts.top4_good_nrr_units,
+    );
 }
 
 fn dfs(
@@ -382,14 +455,32 @@ fn dfs(
     // Outcome 1: Team A wins
     points[a] += 2;
     wins[a] += 1;
-    dfs(match_idx + 1, matches, team_count, seat_scale, allow_no_results, points, wins, counts);
+    dfs(
+        match_idx + 1,
+        matches,
+        team_count,
+        seat_scale,
+        allow_no_results,
+        points,
+        wins,
+        counts,
+    );
     wins[a] -= 1;
     points[a] -= 2;
 
     // Outcome 2: Team B wins
     points[b] += 2;
     wins[b] += 1;
-    dfs(match_idx + 1, matches, team_count, seat_scale, allow_no_results, points, wins, counts);
+    dfs(
+        match_idx + 1,
+        matches,
+        team_count,
+        seat_scale,
+        allow_no_results,
+        points,
+        wins,
+        counts,
+    );
     wins[b] -= 1;
     points[b] -= 2;
 
@@ -397,7 +488,16 @@ fn dfs(
     if allow_no_results {
         points[a] += 1;
         points[b] += 1;
-        dfs(match_idx + 1, matches, team_count, seat_scale, allow_no_results, points, wins, counts);
+        dfs(
+            match_idx + 1,
+            matches,
+            team_count,
+            seat_scale,
+            allow_no_results,
+            points,
+            wins,
+            counts,
+        );
         points[b] -= 1;
         points[a] -= 1;
     }
@@ -425,20 +525,44 @@ fn build_tasks(
 
     points[a] += 2;
     wins[a] += 1;
-    build_tasks(match_idx + 1, split_depth, matches, allow_no_results, points, wins, tasks);
+    build_tasks(
+        match_idx + 1,
+        split_depth,
+        matches,
+        allow_no_results,
+        points,
+        wins,
+        tasks,
+    );
     wins[a] -= 1;
     points[a] -= 2;
 
     points[b] += 2;
     wins[b] += 1;
-    build_tasks(match_idx + 1, split_depth, matches, allow_no_results, points, wins, tasks);
+    build_tasks(
+        match_idx + 1,
+        split_depth,
+        matches,
+        allow_no_results,
+        points,
+        wins,
+        tasks,
+    );
     wins[b] -= 1;
     points[b] -= 2;
 
     if allow_no_results {
         points[a] += 1;
         points[b] += 1;
-        build_tasks(match_idx + 1, split_depth, matches, allow_no_results, points, wins, tasks);
+        build_tasks(
+            match_idx + 1,
+            split_depth,
+            matches,
+            allow_no_results,
+            points,
+            wins,
+            tasks,
+        );
         points[b] -= 1;
         points[a] -= 1;
     }
@@ -465,10 +589,15 @@ fn fmt_scaled_pct(units: u64, total_scenarios: u64, seat_scale: u64) -> String {
 
 fn print_usage(program_name: &str) {
     eprintln!("{BOLD}{CYAN}IPL Playoff Calculator{RESET}\n");
-    eprintln!("{BOLD}{YELLOW}Usage:{RESET} {} <matches_file> [--allow-no-results]", program_name);
+    eprintln!(
+        "{BOLD}{YELLOW}Usage:{RESET} {} <matches_file> [--allow-no-results]",
+        program_name
+    );
     eprintln!("\n{BOLD}Arguments:{RESET}");
     eprintln!("  <matches_file>       Path to the text file containing the schedule.");
-    eprintln!("  --allow-no-results   (Optional) Include ties/washouts (1 pt each) in future outcomes.");
+    eprintln!(
+        "  --allow-no-results   (Optional) Include ties/washouts (1 pt each) in future outcomes."
+    );
     eprintln!("\n{BOLD}Matches File Format Instructions:{RESET}");
     eprintln!("  - Provide one match per line. Lines starting with '#' are ignored.");
     eprintln!("  - {BOLD}Upcoming match:{RESET}  Team A vs Team B");
@@ -479,185 +608,13 @@ fn print_usage(program_name: &str) {
     eprintln!("  MI vs DC          # Upcoming match\n");
 }
 
-fn run() -> Result<(), AppError> {
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() < 2 || args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_usage(&args[0]);
-        std::process::exit(1);
-    }
-
-    let file_path = &args[1];
-    let allow_no_results = args.iter().any(|arg| arg == "--allow-no-results");
-
-    let matches_input = fs::read_to_string(file_path).map_err(|e| {
-        AppError::Parse(format!("Error reading file '{}': {}", file_path, e))
-    })?;
-
-    let parsed = parse_inputs(&matches_input)?;
-    let team_count = parsed.team_count;
-    let seat_scale = parsed.seat_scale;
-
-    let base = if allow_no_results { 3u64 } else { 2u64 };
-    let total_scenarios = pow_u64(base, parsed.matches.len())?;
-    let num_threads = thread::available_parallelism().map(|p| p.get()).unwrap_or(4);
-
-    let mut split_depth = 0usize;
-    let mut task_count = 1u64;
-    while split_depth < parsed.matches.len()
-        && task_count < (num_threads as u64 * TASKS_PER_THREAD_TARGET)
-    {
-        split_depth += 1;
-        task_count = task_count
-            .checked_mul(base)
-            .ok_or_else(|| AppError::Parse("Task count overflowed u64".to_string()))?;
-    }
-
-    let mut points = parsed.points;
-    let mut wins = parsed.wins;
-    let mut tasks = Vec::with_capacity(task_count as usize);
-    build_tasks(0, split_depth, &parsed.matches, allow_no_results, &mut points, &mut wins, &mut tasks);
-
-    let matches = Arc::new(parsed.matches.clone());
-    let tasks = Arc::new(tasks);
-    let chunk_size = tasks.len().div_ceil(num_threads);
-
-    // Compute dynamic column width from the longest team name
-    let name_col_width = parsed.team_names.iter().map(|n| n.len()).max().unwrap_or(6).max(6);
-
-    println!("{BOLD}{CYAN}=========== Current Standings ==========={RESET}");
-    println!(
-        "{BOLD}{YELLOW}{:>8} {:<width$} {:>4} {:>4} {:>4} {:>4} {:>4}{RESET}",
-        "Position", "Team", "M", "W", "L", "NR", "Pts",
-        width = name_col_width
-    );
-
-    let current_order = sort_teams(team_count, &parsed.points, &parsed.wins);
-    for (idx, &i) in current_order.iter().take(team_count).enumerate() {
-        println!(
-            "{:>8} {BOLD}{GREEN}{:<width$}{RESET} {:>4} {:>4} {:>4} {:>4} {BOLD}{:>4}{RESET}",
-            idx + 1,
-            parsed.team_names[i],
-            parsed.matches_played[i],
-            parsed.wins[i],
-            parsed.losses[i],
-            parsed.no_results[i],
-            parsed.points[i],
-            width = name_col_width
-        );
-    }
-
-    println!();
-
-    println!("{BOLD}{CYAN}========= Playoff Probabilities ========={RESET}");
-    println!("{MAGENTA}Completed matches:{RESET} {}", parsed.completed_matches);
-    println!("{MAGENTA}Remaining matches:{RESET} {}", matches.len());
-    println!("{MAGENTA}Outcome mode:{RESET} {} per match", base);
-    println!("{MAGENTA}Total scenarios:{RESET} {}", format_with_commas(total_scenarios));
-    println!("{MAGENTA}Threads:{RESET} {}", num_threads);
-    println!();
-
-    let total_tasks = tasks.len();
-
-    if total_tasks == 0 {
-        println!("No remaining matches to simulate.");
-        // Still need to classify the current state
-        let mut final_counts = Counts::default();
-        classify(team_count, seat_scale, &parsed.points, &parsed.wins, &mut final_counts);
-        print_results(&parsed, &final_counts, total_scenarios, seat_scale, name_col_width);
-        return Ok(());
-    }
-
-    let (tx, rx) = mpsc::channel();
-    let start_time = Instant::now();
-
-    let mut handles = Vec::new();
-    for t in 0..num_threads {
-        let start = t * chunk_size;
-        if start >= tasks.len() {
-            break;
-        }
-
-        let end = ((t + 1) * chunk_size).min(tasks.len());
-        let tasks_clone = Arc::clone(&tasks);
-        let matches_clone = Arc::clone(&matches);
-        let tx_clone = tx.clone();
-
-        let handle = thread::spawn(move || {
-            let mut local = Counts::default();
-            for task in &tasks_clone[start..end] {
-                let mut local_points = task.points;
-                let mut local_wins = task.wins;
-                dfs(
-                    task.next_match,
-                    &matches_clone,
-                    team_count,
-                    seat_scale,
-                    allow_no_results,
-                    &mut local_points,
-                    &mut local_wins,
-                    &mut local,
-                );
-                let _ = tx_clone.send(());
-            }
-            local
-        });
-
-        handles.push(handle);
-    }
-
-    // Drop the original sender so the channel closes when all threads finish
-    drop(tx);
-
-    // --- Progress Bar UI Loop ---
-    let mut completed_tasks = 0usize;
-
-    for _ in rx {
-        completed_tasks += 1;
-        let elapsed = start_time.elapsed().as_secs_f64();
-        let pct = (completed_tasks as f64) / (total_tasks as f64);
-
-        let eta = if pct > 0.0 {
-            (elapsed / pct) - elapsed
-        } else {
-            0.0
-        };
-
-        let bar_width = 40;
-        let filled = (pct * bar_width as f64) as usize;
-        let bar: String = (0..bar_width)
-            .map(|i| if i < filled { '=' } else if i == filled { '>' } else { ' ' })
-            .collect();
-
-        print!(
-            "\r{CYAN}Progress:{RESET} [{bar}] {BOLD}{:>5.1}%{RESET} | {YELLOW}Elapsed:{RESET} {:>5.1}s | {GREEN}ETA:{RESET} {:>5.1}s ",
-            pct * 100.0,
-            elapsed,
-            eta
-        );
-        io::stdout().flush().unwrap();
-    }
-
-    println!("\n"); // Move to a new line once complete
-
-    // Collect the final calculations from all threads
-    let mut total_counts = Counts::default();
-    for handle in handles {
-        let local = handle.join().unwrap();
-        total_counts += &local;
-    }
-
-    print_results(&parsed, &total_counts, total_scenarios, seat_scale, name_col_width);
-
-    Ok(())
-}
-
 fn print_results(
     parsed: &ParsedInput,
     total_counts: &Counts,
     total_scenarios: u64,
     seat_scale: u64,
     name_col_width: usize,
+    c: &Colors,
 ) {
     let mut rows: Vec<Row> = (0..parsed.team_count)
         .map(|i| Row {
@@ -679,15 +636,23 @@ fn print_results(
     });
 
     println!(
-        "{BOLD}{YELLOW}{:<width$} {:>14} {:>20} {:>14} {:>20}{RESET}",
-        "Team", "Top 2 Pts", "Top 2 Pts+Good NRR", "Top 4 Pts", "Top 4 Pts+Good NRR",
+        "{}{:<width$} {:>14} {:>20} {:>14} {:>20}{}",
+        c.yellow,
+        "Team",
+        "Top 2 Pts",
+        "Top 2 Pts+Good NRR",
+        "Top 4 Pts",
+        "Top 4 Pts+Good NRR",
+        c.reset,
         width = name_col_width
     );
 
     for row in rows {
         println!(
-            "{BOLD}{GREEN}{:<width$}{RESET} {:>14} {:>20} {:>14} {:>20}",
+            "{}{:<width$}{} {:>14} {:>20} {:>14} {:>20}",
+            c.green,
             row.team,
+            c.reset,
             fmt_pct(row.top2_pts, total_scenarios),
             fmt_scaled_pct(row.top2_good_nrr_units, total_scenarios, seat_scale),
             fmt_pct(row.top4_pts, total_scenarios),
@@ -697,9 +662,273 @@ fn print_results(
     }
 }
 
+fn run() -> Result<(), AppError> {
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() < 2 || args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_usage(&args[0]);
+        std::process::exit(1);
+    }
+
+    let file_path = &args[1];
+    let allow_no_results = args.iter().any(|arg| arg == "--allow-no-results");
+
+    // Detect TTY: suppress ANSI codes when stdout is piped/redirected
+    let c = Colors::new(io::stdout().is_terminal());
+
+    let matches_input = fs::read_to_string(file_path)
+        .map_err(|e| AppError::Parse(format!("Error reading file '{}': {}", file_path, e)))?;
+
+    let parsed = parse_inputs(&matches_input)?;
+    let team_count = parsed.team_count;
+    let seat_scale = parsed.seat_scale;
+
+    let base = if allow_no_results { 3u64 } else { 2u64 };
+    let total_scenarios = pow_u64(base, parsed.matches.len())?;
+    let num_threads = thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+
+    let mut split_depth = 0usize;
+    let mut task_count = 1u64;
+    while split_depth < parsed.matches.len()
+        && task_count < (num_threads as u64 * TASKS_PER_THREAD_TARGET)
+    {
+        split_depth += 1;
+        task_count = task_count
+            .checked_mul(base)
+            .ok_or_else(|| AppError::Parse("Task count overflowed u64".to_string()))?;
+    }
+
+    let mut points = parsed.points;
+    let mut wins = parsed.wins;
+    let mut tasks = Vec::with_capacity(task_count as usize);
+    build_tasks(
+        0,
+        split_depth,
+        &parsed.matches,
+        allow_no_results,
+        &mut points,
+        &mut wins,
+        &mut tasks,
+    );
+
+    // Compute dynamic column width from the longest team name
+    let name_col_width = parsed
+        .team_names
+        .iter()
+        .map(|n| n.len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
+
+    println!(
+        "{}=========== Current Standings ==========={}",
+        c.cyan, c.reset
+    );
+    println!(
+        "{}{:>8} {:<width$} {:>4} {:>4} {:>4} {:>4} {:>4}{}",
+        c.yellow,
+        "Position",
+        "Team",
+        "M",
+        "W",
+        "L",
+        "NR",
+        "Pts",
+        c.reset,
+        width = name_col_width
+    );
+
+    let current_order = sort_teams(team_count, &parsed.points, &parsed.wins);
+    for (idx, &i) in current_order.iter().take(team_count).enumerate() {
+        println!(
+            "{:>8} {}{:<width$}{} {:>4} {:>4} {:>4} {:>4} {}{:>4}{}",
+            idx + 1,
+            c.green,
+            parsed.team_names[i],
+            c.reset,
+            parsed.matches_played[i],
+            parsed.wins[i],
+            parsed.losses[i],
+            parsed.no_results[i],
+            c.bold,
+            parsed.points[i],
+            c.reset,
+            width = name_col_width
+        );
+    }
+
+    println!();
+    println!(
+        "{}========= Playoff Probabilities ========={}",
+        c.cyan, c.reset
+    );
+    println!(
+        "{}Completed matches:{} {}",
+        c.magenta, c.reset, parsed.completed_matches
+    );
+    println!(
+        "{}Remaining matches:{} {}",
+        c.magenta,
+        c.reset,
+        parsed.matches.len()
+    );
+    println!("{}Outcome mode:{} {} per match", c.magenta, c.reset, base);
+    println!(
+        "{}Total scenarios:{} {}",
+        c.magenta,
+        c.reset,
+        format_with_commas(total_scenarios)
+    );
+    println!("{}Threads:{} {}", c.magenta, c.reset, num_threads);
+    println!();
+
+    let total_tasks = tasks.len();
+
+    if total_tasks == 0 {
+        println!("No remaining matches to simulate.");
+        let mut final_counts = Counts::default();
+        classify(
+            team_count,
+            seat_scale,
+            &parsed.points,
+            &parsed.wins,
+            &mut final_counts,
+        );
+        print_results(
+            &parsed,
+            &final_counts,
+            total_scenarios,
+            seat_scale,
+            name_col_width,
+            &c,
+        );
+        return Ok(());
+    }
+
+    let matches_arc = Arc::new(parsed.matches.clone());
+    let tasks_arc = Arc::new(tasks);
+
+    // Shared atomic cursor — threads pull tasks dynamically, eliminating static chunk imbalance
+    let next_task = Arc::new(AtomicUsize::new(0));
+
+    let (tx, rx) = mpsc::channel::<()>();
+    let start_time = Instant::now();
+
+    let mut handles = Vec::new();
+    for _ in 0..num_threads {
+        let next_task_clone = Arc::clone(&next_task);
+        let tasks_clone = Arc::clone(&tasks_arc);
+        let matches_clone = Arc::clone(&matches_arc);
+        let tx_clone = tx.clone();
+
+        let handle = thread::spawn(move || -> Counts {
+            let mut local = Counts::default();
+            loop {
+                let idx = next_task_clone.fetch_add(1, Ordering::Relaxed);
+                if idx >= tasks_clone.len() {
+                    break;
+                }
+                let task = &tasks_clone[idx];
+                let mut local_points = task.points;
+                let mut local_wins = task.wins;
+                dfs(
+                    task.next_match,
+                    &matches_clone,
+                    team_count,
+                    seat_scale,
+                    allow_no_results,
+                    &mut local_points,
+                    &mut local_wins,
+                    &mut local,
+                );
+                // One tick per task — progress bar updates smoothly throughout
+                let _ = tx_clone.send(());
+            }
+            local
+        });
+
+        handles.push(handle);
+    }
+
+    // Drop original sender so the channel closes when all threads finish
+    drop(tx);
+
+    // --- Progress Bar UI Loop ---
+    let mut completed_tasks = 0usize;
+    for _ in rx {
+        completed_tasks += 1;
+        let elapsed = start_time.elapsed().as_secs_f64();
+        let pct = completed_tasks as f64 / total_tasks as f64;
+        let eta = if pct > 0.0 {
+            (elapsed / pct) - elapsed
+        } else {
+            0.0
+        };
+
+        let bar_width = 40;
+        let filled = (pct * bar_width as f64) as usize;
+        let bar: String = (0..bar_width)
+            .map(|i| {
+                if i < filled {
+                    '='
+                } else if i == filled {
+                    '>'
+                } else {
+                    ' '
+                }
+            })
+            .collect();
+
+        print!(
+            "\r{}Progress:{} [{}] {}{:>5.1}%{} | {}Elapsed:{} {:>5.1}s | {}ETA:{} {:>5.1}s ",
+            c.cyan,
+            c.reset,
+            bar,
+            c.bold,
+            pct * 100.0,
+            c.reset,
+            c.yellow,
+            c.reset,
+            elapsed,
+            c.green,
+            c.reset,
+            eta
+        );
+        io::stdout().flush().unwrap();
+    }
+
+    println!("\n");
+
+    // Collect results from all threads; propagate any thread panics as errors
+    let mut total_counts = Counts::default();
+    for handle in handles {
+        let local = handle.join().unwrap_or_else(|_| {
+            eprintln!(
+                "{}Error:{} A worker thread panicked. Results may be incomplete.",
+                c.yellow, c.reset
+            );
+            std::process::exit(1);
+        });
+        total_counts += &local;
+    }
+
+    print_results(
+        &parsed,
+        &total_counts,
+        total_scenarios,
+        seat_scale,
+        name_col_width,
+        &c,
+    );
+
+    Ok(())
+}
+
 fn main() {
     if let Err(e) = run() {
-        eprintln!("{BOLD}{YELLOW}Error:{RESET} {}", e);
+        eprintln!("{}Error:{} {}", YELLOW, RESET, e);
         std::process::exit(1);
     }
 }
