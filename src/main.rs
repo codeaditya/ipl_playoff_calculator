@@ -1,95 +1,11 @@
+use std::env;
+use std::fs;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::io::{self, Write};
 use std::sync::mpsc;
 use std::time::Instant;
-
-// ================================================================
-// EDITABLE GLOBALS
-// ================================================================
-
-const ALLOW_NO_RESULTS: bool = false;
-
-// Format:
-// Upcoming Match: Team A vs Team B
-// Completed (Winner): Team A vs Team B : Team A
-// Completed (Tie/NR): Team A vs Team B : NR
-const MATCHES_INPUT: &str = r#"
-# --- COMPLETED MATCHES ---
-SRH vs RCB : RCB
-KKR vs MI : MI
-CSK vs RR : RR
-GT vs PBKS : PBKS
-LSG vs DC : DC
-SRH vs KKR : SRH
-CSK vs PBKS : PBKS
-MI vs DC : DC
-RR vs GT : RR
-SRH vs LSG : LSG
-RCB vs CSK : RCB
-KKR vs PBKS : NR
-RR vs MI : RR
-GT vs DC : GT
-KKR vs LSG : LSG
-RCB vs RR : RR
-SRH vs PBKS : PBKS
-CSK vs DC : CSK
-LSG vs GT : GT
-RCB vs MI : RCB
-SRH vs RR : SRH
-CSK vs KKR : CSK
-LSG vs RCB : RCB
-MI vs PBKS : PBKS
-KKR vs GT : GT
-RCB vs DC : DC
-SRH vs CSK : SRH
-RR vs KKR : KKR
-PBKS vs LSG : PBKS
-MI vs GT : MI
-SRH vs DC : SRH
-RR vs LSG : RR
-CSK vs MI : CSK
-GT vs RCB : RCB
-DC vs PBKS : PBKS
-RR vs SRH : SRH
-CSK vs GT : GT
-KKR vs LSG : KKR
-DC vs RCB : RCB
-PBKS vs RR : RR
-MI vs SRH : SRH
-RCB vs GT : GT
-RR vs DC : DC
-MI vs CSK : CSK
-SRH vs KKR : KKR
-
-# --- UPCOMING MATCHES ---
-PBKS vs GT
-MI vs LSG
-DC vs CSK
-SRH vs PBKS
-LSG vs RCB
-DC vs KKR
-RR vs GT
-CSK vs LSG
-RCB vs MI
-PBKS vs DC
-GT vs SRH
-RCB vs KKR
-PBKS vs MI
-LSG vs CSK
-KKR vs GT
-PBKS vs RCB
-DC vs RR
-CSK vs SRH
-RR vs LSG
-KKR vs MI
-GT vs CSK
-SRH vs RCB
-LSG vs PBKS
-MI vs RR
-KKR vs DC
-"#;
 
 // ================================================================
 // TERMINAL COLORS
@@ -213,7 +129,7 @@ fn parse_match_line(line: &str) -> (String, String) {
     panic!("Invalid match line: '{}'. Expected 'Team A vs Team B'", line);
 }
 
-fn parse_inputs() -> ParsedInput {
+fn parse_inputs(matches_input: &str) -> ParsedInput {
     let mut team_names = Vec::new();
     let mut team_map = HashMap::new();
     let mut points = [0u8; MAX_TEAMS];
@@ -239,7 +155,7 @@ fn parse_inputs() -> ParsedInput {
         }
     };
 
-    for raw_line in MATCHES_INPUT.lines() {
+    for raw_line in matches_input.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -402,6 +318,7 @@ fn dfs(
     matches: &[(usize, usize)],
     team_count: usize,
     seat_scale: u64,
+    allow_no_results: bool,
     points: &mut [u8; MAX_TEAMS],
     wins: &mut [u8; MAX_TEAMS],
     counts: &mut Counts,
@@ -416,22 +333,22 @@ fn dfs(
     // Outcome 1: Team A wins
     points[a] += 2;
     wins[a] += 1;
-    dfs(match_idx + 1, matches, team_count, seat_scale, points, wins, counts);
+    dfs(match_idx + 1, matches, team_count, seat_scale, allow_no_results, points, wins, counts);
     wins[a] -= 1;
     points[a] -= 2;
 
     // Outcome 2: Team B wins
     points[b] += 2;
     wins[b] += 1;
-    dfs(match_idx + 1, matches, team_count, seat_scale, points, wins, counts);
+    dfs(match_idx + 1, matches, team_count, seat_scale, allow_no_results, points, wins, counts);
     wins[b] -= 1;
     points[b] -= 2;
 
     // Outcome 3: No Result (Tie/Washout)
-    if ALLOW_NO_RESULTS {
+    if allow_no_results {
         points[a] += 1;
         points[b] += 1;
-        dfs(match_idx + 1, matches, team_count, seat_scale, points, wins, counts);
+        dfs(match_idx + 1, matches, team_count, seat_scale, allow_no_results, points, wins, counts);
         points[b] -= 1;
         points[a] -= 1;
     }
@@ -441,6 +358,7 @@ fn build_tasks(
     match_idx: usize,
     split_depth: usize,
     matches: &[(usize, usize)],
+    allow_no_results: bool,
     points: &mut [u8; MAX_TEAMS],
     wins: &mut [u8; MAX_TEAMS],
     tasks: &mut Vec<Task>,
@@ -458,20 +376,20 @@ fn build_tasks(
 
     points[a] += 2;
     wins[a] += 1;
-    build_tasks(match_idx + 1, split_depth, matches, points, wins, tasks);
+    build_tasks(match_idx + 1, split_depth, matches, allow_no_results, points, wins, tasks);
     wins[a] -= 1;
     points[a] -= 2;
 
     points[b] += 2;
     wins[b] += 1;
-    build_tasks(match_idx + 1, split_depth, matches, points, wins, tasks);
+    build_tasks(match_idx + 1, split_depth, matches, allow_no_results, points, wins, tasks);
     wins[b] -= 1;
     points[b] -= 2;
 
-    if ALLOW_NO_RESULTS {
+    if allow_no_results {
         points[a] += 1;
         points[b] += 1;
-        build_tasks(match_idx + 1, split_depth, matches, points, wins, tasks);
+        build_tasks(match_idx + 1, split_depth, matches, allow_no_results, points, wins, tasks);
         points[b] -= 1;
         points[a] -= 1;
     }
@@ -496,12 +414,48 @@ fn fmt_scaled_pct(units: u64, total_scenarios: u64, seat_scale: u64) -> String {
     format!("{:.4}%", (units as f64) * 100.0 / denom)
 }
 
+fn print_usage(program_name: &str) {
+    eprintln!("{BOLD}{CYAN}IPL Playoff Calculator{RESET}\n");
+    eprintln!("{BOLD}{YELLOW}Usage:{RESET} {} <path_to_matches_file.txt> [--allow-no-results]", program_name);
+    eprintln!("\n{BOLD}Arguments:{RESET}");
+    eprintln!("  <path_to_matches_file>   Path to the text file containing the schedule.");
+    eprintln!("  --allow-no-results       (Optional) Include ties/washouts (1 pt each) in future outcomes.");
+    eprintln!("\n{BOLD}File Format Instructions:{RESET}");
+    eprintln!("  - Provide one match per line. Lines starting with '#' are ignored.");
+    eprintln!("  - {BOLD}Upcoming match:{RESET}      Team A vs Team B");
+    eprintln!("  - {BOLD}Completed match:{RESET}     Team A vs Team B : Winner Team");
+    eprintln!("  - {BOLD}No Result / Tie:{RESET}     Team A vs Team B : NR");
+    eprintln!("\n{BOLD}Example:{RESET}");
+    eprintln!("  CSK vs RCB : CSK   # CSK won this match");
+    eprintln!("  MI vs DC           # Upcoming match\n");
+}
+
 fn main() {
-    let parsed = parse_inputs();
+    let args: Vec<String> = env::args().collect();
+
+    // Check for help flag or missing file argument
+    if args.len() < 2 || args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_usage(&args[0]);
+        std::process::exit(1);
+    }
+
+    let file_path = &args[1];
+    let allow_no_results = args.iter().any(|arg| arg == "--allow-no-results");
+
+    let matches_input = match fs::read_to_string(file_path) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("{BOLD}{YELLOW}Error reading file '{}':{RESET} {}", file_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    let parsed = parse_inputs(&matches_input);
     let team_count = parsed.team_count;
     let seat_scale = seat_scale_for_team_count(team_count);
 
-    let base = if ALLOW_NO_RESULTS { 3u64 } else { 2u64 };
+    // Use the dynamic boolean flag here
+    let base = if allow_no_results { 3u64 } else { 2u64 };
     let total_scenarios = pow_u64(base, parsed.matches.len());
     let num_threads = thread::available_parallelism().map(|p| p.get()).unwrap_or(4);
 
@@ -515,7 +469,7 @@ fn main() {
     let mut points = parsed.points;
     let mut wins = parsed.wins;
     let mut tasks = Vec::with_capacity(task_count as usize);
-    build_tasks(0, split_depth, &parsed.matches, &mut points, &mut wins, &mut tasks);
+    build_tasks(0, split_depth, &parsed.matches, allow_no_results, &mut points, &mut wins, &mut tasks);
 
     let matches = Arc::new(parsed.matches.clone());
     let tasks = Arc::new(tasks);
@@ -566,7 +520,7 @@ fn main() {
             for task in &tasks_clone[start..end] {
                 let mut local_points = task.points;
                 let mut local_wins = task.wins;
-                dfs(task.next_match, &matches_clone, team_count, seat_scale, &mut local_points, &mut local_wins, &mut local);
+                dfs(task.next_match, &matches_clone, team_count, seat_scale, allow_no_results, &mut local_points, &mut local_wins, &mut local);
 
                 // Report task completion back to the main thread
                 let _ = tx_clone.send(());
