@@ -5,8 +5,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::ops::AddAssign;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Instant;
 
@@ -871,25 +870,33 @@ fn run() -> Result<(), AppError> {
         return Ok(());
     }
 
+    // Every task is created at the same split_depth, so every task spans
+    // the same number of leaf scenarios.
+    let remaining_matches_per_task = parsed.matches.len() - split_depth;
+    let scenarios_per_task = pow_u64(base, remaining_matches_per_task)?;
+
     let matches_arc = Arc::new(parsed.matches.clone());
     let tasks_arc = Arc::new(tasks);
 
-    // Shared atomic cursor — threads pull tasks dynamically, eliminating static chunk imbalance
+    // Shared atomic cursor — threads pull tasks dynamically.
     let next_task = Arc::new(AtomicUsize::new(0));
 
-    let (tx, rx) = mpsc::channel::<()>();
+    // Exact progress in terms of simulated scenarios.
+    let scenarios_done = Arc::new(AtomicU64::new(0));
+
     let start_time = Instant::now();
 
     let mut handles = Vec::new();
     for _ in 0..num_threads {
         let next_task_clone = Arc::clone(&next_task);
+        let scenarios_done_clone = Arc::clone(&scenarios_done);
         let tasks_clone = Arc::clone(&tasks_arc);
         let matches_clone = Arc::clone(&matches_arc);
-        let tx_clone = tx.clone();
         let allow_no_results = cli.allow_no_results;
 
         let handle = thread::spawn(move || -> Counts {
             let mut local = Counts::default();
+
             loop {
                 let idx = next_task_clone.fetch_add(1, Ordering::Relaxed);
                 if idx >= tasks_clone.len() {
@@ -899,6 +906,7 @@ fn run() -> Result<(), AppError> {
                 let task = &tasks_clone[idx];
                 let mut local_points = task.points;
                 let mut local_wins = task.wins;
+
                 dfs(
                     task.next_match,
                     &matches_clone,
@@ -909,66 +917,86 @@ fn run() -> Result<(), AppError> {
                     &mut local_wins,
                     &mut local,
                 );
-                // One tick per task — progress bar updates smoothly throughout
-                let _ = tx_clone.send(());
+
+                scenarios_done_clone.fetch_add(scenarios_per_task, Ordering::Relaxed);
             }
+
             local
         });
 
         handles.push(handle);
     }
 
-    // Drop original sender so the channel closes when all threads finish
-    drop(tx);
-
     // --- Progress Bar UI Loop ---
-    let mut completed_tasks = 0usize;
-    for _ in rx {
-        completed_tasks += 1;
+    if interactive {
+        const PROGRESS_POLL_INTERVAL_MS: u64 = 100;
+        let mut last_drawn = u64::MAX;
 
-        if interactive {
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let pct = completed_tasks as f64 / total_tasks as f64;
-            let eta = if pct > 0.0 {
-                (elapsed / pct) - elapsed
-            } else {
-                0.0
-            };
+        loop {
+            let done = scenarios_done.load(Ordering::Relaxed).min(total_scenarios);
 
-            let bar_width = 40;
-            let filled = (pct * bar_width as f64) as usize;
-            let bar: String = (0..bar_width)
-                .map(|i| {
-                    if i < filled {
-                        '='
-                    } else if i == filled {
-                        '>'
-                    } else {
-                        ' '
-                    }
-                })
-                .collect();
+            if done != last_drawn {
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let pct = if total_scenarios > 0 {
+                    done as f64 / total_scenarios as f64
+                } else {
+                    1.0
+                };
 
-            print!(
-                "\r{}Progress:{} [{}] {}{:>5.1}%{} | {}Elapsed:{} {:>5.1}s | {}ETA:{} {:>5.1}s ",
-                c.cyan,
-                c.reset,
-                bar,
-                c.bold,
-                pct * 100.0,
-                c.reset,
-                c.yellow,
-                c.reset,
-                elapsed,
-                c.green,
-                c.reset,
-                eta
-            );
-            io::stdout().flush().unwrap();
+                let eta = if done > 0 {
+                    let rate = elapsed / done as f64;
+                    rate * (total_scenarios - done) as f64
+                } else {
+                    0.0
+                };
+
+                let bar_width = 40usize;
+                let filled = ((pct * bar_width as f64) as usize).min(bar_width);
+                let bar: String = (0..bar_width)
+                    .map(|i| {
+                        if i < filled {
+                            '='
+                        } else if i == filled && done < total_scenarios {
+                            '>'
+                        } else {
+                            ' '
+                        }
+                    })
+                    .collect();
+
+                print!(
+                    "\r{}Progress:{} [{}] {}{:>5.1}%{} | {}Scenarios:{} {}/{} | {}Elapsed:{} {:>5.1}s | {}ETA:{} {:>5.1}s ",
+                    c.cyan,
+                    c.reset,
+                    bar,
+                    c.bold,
+                    pct * 100.0,
+                    c.reset,
+                    c.magenta,
+                    c.reset,
+                    format_with_commas(done),
+                    format_with_commas(total_scenarios),
+                    c.yellow,
+                    c.reset,
+                    elapsed,
+                    c.green,
+                    c.reset,
+                    eta
+                );
+                io::stdout().flush().unwrap();
+
+                last_drawn = done;
+            }
+
+            if done >= total_scenarios {
+                break;
+            }
+
+            thread::sleep(std::time::Duration::from_millis(PROGRESS_POLL_INTERVAL_MS));
         }
-    }
 
-    println!("\n");
+        println!("\n");
+    }
 
     // Collect results from all threads; propagate any thread panics as errors
     let mut total_counts = Counts::default();
