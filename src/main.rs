@@ -110,14 +110,14 @@ impl Counts {
 #[derive(Clone, Copy)]
 struct Task {
     next_match: usize,
-    points: [i16; TEAM_COUNT],
-    wins: [i16; TEAM_COUNT],
+    points: [u8; TEAM_COUNT],
+    wins: [u8; TEAM_COUNT],
 }
 
 #[derive(Clone, Copy, Default)]
 struct Group {
-    points: i16,
-    wins: i16,
+    points: u8,
+    wins: u8,
     members: [usize; TEAM_COUNT],
     len: usize,
 }
@@ -125,8 +125,8 @@ struct Group {
 #[derive(Clone)]
 struct ParsedInput {
     team_names: Vec<String>,
-    points: [i16; TEAM_COUNT],
-    wins: [i16; TEAM_COUNT],
+    points: [u8; TEAM_COUNT],
+    wins: [u8; TEAM_COUNT],
     matches: Vec<(usize, usize)>,
 }
 
@@ -146,7 +146,7 @@ fn canonical(name: &str) -> String {
         .collect()
 }
 
-fn parse_standings() -> (Vec<String>, [i16; TEAM_COUNT], [i16; TEAM_COUNT], HashMap<String, usize>) {
+fn parse_standings() -> (Vec<String>, [u8; TEAM_COUNT], [u8; TEAM_COUNT], HashMap<String, usize>) {
     let mut team_names = Vec::new();
     let mut points_vec = Vec::new();
     let mut wins_vec = Vec::new();
@@ -167,8 +167,8 @@ fn parse_standings() -> (Vec<String>, [i16; TEAM_COUNT], [i16; TEAM_COUNT], Hash
         }
 
         let team = parts[0].to_string();
-        let pts: i16 = parts[1].parse().unwrap_or_else(|_| panic!("Invalid points in '{}'.", line));
-        let wins: i16 = parts[2].parse().unwrap_or_else(|_| panic!("Invalid wins in '{}'.", line));
+        let pts: u8 = parts[1].parse().unwrap_or_else(|_| panic!("Invalid points in '{}'.", line));
+        let wins: u8 = parts[2].parse().unwrap_or_else(|_| panic!("Invalid wins in '{}'.", line));
 
         let key = canonical(&team);
         if team_map.contains_key(&key) {
@@ -186,8 +186,8 @@ fn parse_standings() -> (Vec<String>, [i16; TEAM_COUNT], [i16; TEAM_COUNT], Hash
         panic!("Expected {} teams in STANDINGS_INPUT, found {}", TEAM_COUNT, team_names.len());
     }
 
-    let points: [i16; TEAM_COUNT] = points_vec.try_into().unwrap();
-    let wins: [i16; TEAM_COUNT] = wins_vec.try_into().unwrap();
+    let points: [u8; TEAM_COUNT] = points_vec.try_into().unwrap();
+    let wins: [u8; TEAM_COUNT] = wins_vec.try_into().unwrap();
     (team_names, points, wins, team_map)
 }
 
@@ -241,7 +241,7 @@ fn pow_u64(base: u64, exp: usize) -> u64 {
     ans
 }
 
-fn sort_teams(points: &[i16; TEAM_COUNT], wins: &[i16; TEAM_COUNT]) -> [usize; TEAM_COUNT] {
+fn sort_teams(points: &[u8; TEAM_COUNT], wins: &[u8; TEAM_COUNT]) -> [usize; TEAM_COUNT] {
     let mut order = [0usize; TEAM_COUNT];
     for i in 0..TEAM_COUNT {
         order[i] = i;
@@ -257,8 +257,8 @@ fn sort_teams(points: &[i16; TEAM_COUNT], wins: &[i16; TEAM_COUNT]) -> [usize; T
 
 fn build_groups(
     order: &[usize; TEAM_COUNT],
-    points: &[i16; TEAM_COUNT],
-    wins: &[i16; TEAM_COUNT],
+    points: &[u8; TEAM_COUNT],
+    wins: &[u8; TEAM_COUNT],
 ) -> ([Group; TEAM_COUNT], usize) {
     let mut groups = [Group::default(); TEAM_COUNT];
     let mut group_count = 0usize;
@@ -324,7 +324,7 @@ fn apply_cutoff(
     }
 }
 
-fn classify(points: &[i16; TEAM_COUNT], wins: &[i16; TEAM_COUNT], counts: &mut Counts) {
+fn classify(points: &[u8; TEAM_COUNT], wins: &[u8; TEAM_COUNT], counts: &mut Counts) {
     let order = sort_teams(points, wins);
     let (groups, group_count) = build_groups(&order, points, wins);
 
@@ -335,8 +335,8 @@ fn classify(points: &[i16; TEAM_COUNT], wins: &[i16; TEAM_COUNT], counts: &mut C
 fn dfs(
     match_idx: usize,
     matches: &[(usize, usize)],
-    points: &mut [i16; TEAM_COUNT],
-    wins: &mut [i16; TEAM_COUNT],
+    points: &mut [u8; TEAM_COUNT],
+    wins: &mut [u8; TEAM_COUNT],
     counts: &mut Counts,
 ) {
     if match_idx == matches.len() {
@@ -371,8 +371,8 @@ fn build_tasks(
     match_idx: usize,
     split_depth: usize,
     matches: &[(usize, usize)],
-    points: &mut [i16; TEAM_COUNT],
-    wins: &mut [i16; TEAM_COUNT],
+    points: &mut [u8; TEAM_COUNT],
+    wins: &mut [u8; TEAM_COUNT],
     tasks: &mut Vec<Task>,
 ) {
     if match_idx == split_depth {
