@@ -1,32 +1,70 @@
 use std::collections::HashMap;
-use std::convert::TryInto;
 use std::sync::Arc;
 use std::thread;
+use std::io::{self, Write};
+use std::sync::mpsc;
+use std::time::Instant;
 
 // ================================================================
 // EDITABLE GLOBALS
 // ================================================================
 
-const TEAM_COUNT: usize = 10;
 const ALLOW_NO_RESULTS: bool = false;
 
-// Format per line: Team Name | Points | Wins
-const STANDINGS_INPUT: &str = r#"
-PBKS | 13 | 6
-RCB  | 12 | 6
-SRH  | 12 | 6
-RR   | 12 | 6
-GT   | 10 | 5
-CSK  | 8  | 4
-DC   | 8  | 4
-KKR  | 7  | 3
-MI   | 4  | 2
-LSG  | 4  | 2
-"#;
-
-// Format per line: Team A vs Team B
+// Format:
+// Upcoming Match: Team A vs Team B
+// Completed (Winner): Team A vs Team B : Team A
+// Completed (Tie/NR): Team A vs Team B : NR
 const MATCHES_INPUT: &str = r#"
-GT vs PBKS
+# --- COMPLETED MATCHES ---
+SRH vs RCB : RCB
+KKR vs MI : MI
+CSK vs RR : RR
+GT vs PBKS : PBKS
+LSG vs DC : DC
+SRH vs KKR : SRH
+CSK vs PBKS : PBKS
+MI vs DC : DC
+RR vs GT : RR
+SRH vs LSG : LSG
+RCB vs CSK : RCB
+KKR vs PBKS : NR
+RR vs MI : RR
+GT vs DC : GT
+KKR vs LSG : LSG
+RCB vs RR : RR
+SRH vs PBKS : PBKS
+CSK vs DC : CSK
+LSG vs GT : GT
+RCB vs MI : RCB
+SRH vs RR : SRH
+CSK vs KKR : CSK
+LSG vs RCB : RCB
+MI vs PBKS : PBKS
+KKR vs GT : GT
+RCB vs DC : DC
+SRH vs CSK : SRH
+RR vs KKR : KKR
+PBKS vs LSG : PBKS
+MI vs GT : MI
+SRH vs DC : SRH
+RR vs LSG : RR
+CSK vs MI : CSK
+GT vs RCB : RCB
+DC vs PBKS : PBKS
+RR vs SRH : SRH
+CSK vs GT : GT
+KKR vs LSG : KKR
+DC vs RCB : RCB
+PBKS vs RR : RR
+MI vs SRH : SRH
+RCB vs GT : GT
+RR vs DC : DC
+MI vs CSK : CSK
+SRH vs KKR : KKR
+
+# --- UPCOMING MATCHES ---
+PBKS vs GT
 MI vs LSG
 DC vs CSK
 SRH vs PBKS
@@ -54,8 +92,20 @@ KKR vs DC
 "#;
 
 // ================================================================
-// END EDITABLE GLOBALS
+// TERMINAL COLORS
 // ================================================================
+
+const BOLD: &str = "\x1b[1m";
+const RESET: &str = "\x1b[0m";
+const CYAN: &str = "\x1b[36m";
+const YELLOW: &str = "\x1b[33m";
+const GREEN: &str = "\x1b[32m";
+const MAGENTA: &str = "\x1b[35m";
+
+// ================================================================
+
+// Internal max capacity to maintain stack allocation performance
+const MAX_TEAMS: usize = 16;
 
 const fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
@@ -84,21 +134,19 @@ const fn seat_scale_for_team_count(team_count: usize) -> u64 {
     scale
 }
 
-const SEAT_SCALE: u64 = seat_scale_for_team_count(TEAM_COUNT);
-
 // ================================================================
 
 #[derive(Clone, Copy, Default)]
 struct Counts {
-    top2_pts: [u64; TEAM_COUNT],
-    top2_good_nrr_units: [u64; TEAM_COUNT],
-    top4_pts: [u64; TEAM_COUNT],
-    top4_good_nrr_units: [u64; TEAM_COUNT],
+    top2_pts: [u64; MAX_TEAMS],
+    top2_good_nrr_units: [u64; MAX_TEAMS],
+    top4_pts: [u64; MAX_TEAMS],
+    top4_good_nrr_units: [u64; MAX_TEAMS],
 }
 
 impl Counts {
     fn add_assign(&mut self, other: &Counts) {
-        for i in 0..TEAM_COUNT {
+        for i in 0..MAX_TEAMS {
             self.top2_pts[i] += other.top2_pts[i];
             self.top2_good_nrr_units[i] += other.top2_good_nrr_units[i];
             self.top4_pts[i] += other.top4_pts[i];
@@ -110,24 +158,29 @@ impl Counts {
 #[derive(Clone, Copy)]
 struct Task {
     next_match: usize,
-    points: [u8; TEAM_COUNT],
-    wins: [u8; TEAM_COUNT],
+    points: [u8; MAX_TEAMS],
+    wins: [u8; MAX_TEAMS],
 }
 
 #[derive(Clone, Copy, Default)]
 struct Group {
     points: u8,
     wins: u8,
-    members: [usize; TEAM_COUNT],
+    members: [usize; MAX_TEAMS],
     len: usize,
 }
 
 #[derive(Clone)]
 struct ParsedInput {
     team_names: Vec<String>,
-    points: [u8; TEAM_COUNT],
-    wins: [u8; TEAM_COUNT],
+    team_count: usize,
+    points: [u8; MAX_TEAMS],
+    wins: [u8; MAX_TEAMS],
+    matches_played: [u8; MAX_TEAMS],
+    losses: [u8; MAX_TEAMS],
+    no_results: [u8; MAX_TEAMS],
     matches: Vec<(usize, usize)>,
+    completed_matches: usize,
 }
 
 #[derive(Clone)]
@@ -146,51 +199,6 @@ fn canonical(name: &str) -> String {
         .collect()
 }
 
-fn parse_standings() -> (Vec<String>, [u8; TEAM_COUNT], [u8; TEAM_COUNT], HashMap<String, usize>) {
-    let mut team_names = Vec::new();
-    let mut points_vec = Vec::new();
-    let mut wins_vec = Vec::new();
-    let mut team_map = HashMap::new();
-
-    for raw_line in STANDINGS_INPUT.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.split('|').map(|x| x.trim()).collect();
-        if parts.len() != 3 {
-            panic!("Invalid standings line: '{}'. Expected format: Team | Points | Wins", line);
-        }
-        if parts[0].eq_ignore_ascii_case("team") {
-            continue;
-        }
-
-        let team = parts[0].to_string();
-        let pts: u8 = parts[1].parse().unwrap_or_else(|_| panic!("Invalid points in '{}'.", line));
-        let wins: u8 = parts[2].parse().unwrap_or_else(|_| panic!("Invalid wins in '{}'.", line));
-
-        let key = canonical(&team);
-        if team_map.contains_key(&key) {
-            panic!("Duplicate team in standings: '{}'", team);
-        }
-
-        let idx = team_names.len();
-        team_names.push(team);
-        points_vec.push(pts);
-        wins_vec.push(wins);
-        team_map.insert(key, idx);
-    }
-
-    if team_names.len() != TEAM_COUNT {
-        panic!("Expected {} teams in STANDINGS_INPUT, found {}", TEAM_COUNT, team_names.len());
-    }
-
-    let points: [u8; TEAM_COUNT] = points_vec.try_into().unwrap();
-    let wins: [u8; TEAM_COUNT] = wins_vec.try_into().unwrap();
-    (team_names, points, wins, team_map)
-}
-
 fn parse_match_line(line: &str) -> (String, String) {
     let lower = line.to_ascii_lowercase();
     if let Some(pos) = lower.find(" vs ") {
@@ -205,8 +213,31 @@ fn parse_match_line(line: &str) -> (String, String) {
     panic!("Invalid match line: '{}'. Expected 'Team A vs Team B'", line);
 }
 
-fn parse_matches(team_map: &HashMap<String, usize>) -> Vec<(usize, usize)> {
+fn parse_inputs() -> ParsedInput {
+    let mut team_names = Vec::new();
+    let mut team_map = HashMap::new();
+    let mut points = [0u8; MAX_TEAMS];
+    let mut wins = [0u8; MAX_TEAMS];
+    let mut matches_played = [0u8; MAX_TEAMS];
+    let mut losses = [0u8; MAX_TEAMS];
+    let mut no_results = [0u8; MAX_TEAMS];
     let mut matches = Vec::new();
+    let mut completed_matches = 0usize;
+
+    let mut get_or_insert_team = |name: &str| -> usize {
+        let key = canonical(name);
+        if let Some(&idx) = team_map.get(&key) {
+            idx
+        } else {
+            let idx = team_names.len();
+            if idx >= MAX_TEAMS {
+                panic!("Too many teams! Max supported is {}", MAX_TEAMS);
+            }
+            team_names.push(name.to_string());
+            team_map.insert(key, idx);
+            idx
+        }
+    };
 
     for raw_line in MATCHES_INPUT.lines() {
         let line = raw_line.trim();
@@ -214,23 +245,51 @@ fn parse_matches(team_map: &HashMap<String, usize>) -> Vec<(usize, usize)> {
             continue;
         }
 
-        let (a_name, b_name) = parse_match_line(line);
-        let a = *team_map.get(&canonical(&a_name)).unwrap_or_else(|| panic!("Unknown team '{}' in '{}'.", a_name, line));
-        let b = *team_map.get(&canonical(&b_name)).unwrap_or_else(|| panic!("Unknown team '{}' in '{}'.", b_name, line));
+        let parts: Vec<&str> = line.split(':').collect();
+        let match_part = parts[0].trim();
+        let (a_name, b_name) = parse_match_line(match_part);
 
-        if a == b {
-            panic!("Invalid match '{}': a team cannot play itself", line);
+        let a = get_or_insert_team(&a_name);
+        let b = get_or_insert_team(&b_name);
+
+        if parts.len() > 1 {
+            completed_matches += 1;
+            matches_played[a] += 1;
+            matches_played[b] += 1;
+
+            let outcome = canonical(parts[1].trim());
+            if outcome == canonical("NR") {
+                points[a] += 1;
+                points[b] += 1;
+                no_results[a] += 1;
+                no_results[b] += 1;
+            } else if outcome == canonical(&a_name) {
+                points[a] += 2;
+                wins[a] += 1;
+                losses[b] += 1;
+            } else if outcome == canonical(&b_name) {
+                points[b] += 2;
+                wins[b] += 1;
+                losses[a] += 1;
+            } else {
+                panic!("Invalid outcome '{}' in line '{}'", parts[1], line);
+            }
+        } else {
+            matches.push((a, b));
         }
-        matches.push((a, b));
     }
 
-    matches
-}
-
-fn parse_inputs() -> ParsedInput {
-    let (team_names, points, wins, team_map) = parse_standings();
-    let matches = parse_matches(&team_map);
-    ParsedInput { team_names, points, wins, matches }
+    ParsedInput {
+        team_count: team_names.len(),
+        team_names,
+        points,
+        wins,
+        matches_played,
+        losses,
+        no_results,
+        matches,
+        completed_matches
+    }
 }
 
 fn pow_u64(base: u64, exp: usize) -> u64 {
@@ -241,12 +300,13 @@ fn pow_u64(base: u64, exp: usize) -> u64 {
     ans
 }
 
-fn sort_teams(points: &[u8; TEAM_COUNT], wins: &[u8; TEAM_COUNT]) -> [usize; TEAM_COUNT] {
-    let mut order = [0usize; TEAM_COUNT];
-    for i in 0..TEAM_COUNT {
+fn sort_teams(team_count: usize, points: &[u8; MAX_TEAMS], wins: &[u8; MAX_TEAMS]) -> [usize; MAX_TEAMS] {
+    let mut order = [0usize; MAX_TEAMS];
+    for i in 0..team_count {
         order[i] = i;
     }
-    order.sort_unstable_by(|&a, &b| {
+
+    order[..team_count].sort_unstable_by(|&a, &b| {
         points[b]
             .cmp(&points[a])
             .then(wins[b].cmp(&wins[a]))
@@ -256,14 +316,15 @@ fn sort_teams(points: &[u8; TEAM_COUNT], wins: &[u8; TEAM_COUNT]) -> [usize; TEA
 }
 
 fn build_groups(
-    order: &[usize; TEAM_COUNT],
-    points: &[u8; TEAM_COUNT],
-    wins: &[u8; TEAM_COUNT],
-) -> ([Group; TEAM_COUNT], usize) {
-    let mut groups = [Group::default(); TEAM_COUNT];
+    order: &[usize; MAX_TEAMS],
+    team_count: usize,
+    points: &[u8; MAX_TEAMS],
+    wins: &[u8; MAX_TEAMS],
+) -> ([Group; MAX_TEAMS], usize) {
+    let mut groups = [Group::default(); MAX_TEAMS];
     let mut group_count = 0usize;
 
-    for &team in order.iter() {
+    for &team in order.iter().take(team_count) {
         if group_count > 0 {
             let last = &mut groups[group_count - 1];
             if last.points == points[team] && last.wins == wins[team] {
@@ -272,27 +333,26 @@ fn build_groups(
                 continue;
             }
         }
-
         let mut group = Group {
             points: points[team],
             wins: wins[team],
-            members: [0usize; TEAM_COUNT],
+            members: [0usize; MAX_TEAMS],
             len: 1,
         };
         group.members[0] = team;
         groups[group_count] = group;
         group_count += 1;
     }
-
     (groups, group_count)
 }
 
 fn apply_cutoff(
-    groups: &[Group; TEAM_COUNT],
+    groups: &[Group; MAX_TEAMS],
     group_count: usize,
     cutoff: usize,
-    guaranteed: &mut [u64; TEAM_COUNT],
-    seat_aware_units: &mut [u64; TEAM_COUNT],
+    seat_scale: u64,
+    guaranteed: &mut [u64; MAX_TEAMS],
+    seat_aware_units: &mut [u64; MAX_TEAMS],
 ) {
     let mut placed_above = 0usize;
 
@@ -307,7 +367,7 @@ fn apply_cutoff(
         let seat_units_per_team = if spots_here == 0 {
             0u64
         } else {
-            (spots_here as u64) * SEAT_SCALE / (group.len as u64)
+            (spots_here as u64) * seat_scale / (group.len as u64)
         };
 
         for idx in 0..group.len {
@@ -319,49 +379,59 @@ fn apply_cutoff(
                 guaranteed[team] += 1;
             }
         }
-
         placed_above += group.len;
     }
 }
 
-fn classify(points: &[u8; TEAM_COUNT], wins: &[u8; TEAM_COUNT], counts: &mut Counts) {
-    let order = sort_teams(points, wins);
-    let (groups, group_count) = build_groups(&order, points, wins);
+fn classify(
+    team_count: usize,
+    seat_scale: u64,
+    points: &[u8; MAX_TEAMS],
+    wins: &[u8; MAX_TEAMS],
+    counts: &mut Counts
+) {
+    let order = sort_teams(team_count, points, wins);
+    let (groups, group_count) = build_groups(&order, team_count, points, wins);
 
-    apply_cutoff(&groups, group_count, 2, &mut counts.top2_pts, &mut counts.top2_good_nrr_units);
-    apply_cutoff(&groups, group_count, 4, &mut counts.top4_pts, &mut counts.top4_good_nrr_units);
+    apply_cutoff(&groups, group_count, 2, seat_scale, &mut counts.top2_pts, &mut counts.top2_good_nrr_units);
+    apply_cutoff(&groups, group_count, 4, seat_scale, &mut counts.top4_pts, &mut counts.top4_good_nrr_units);
 }
 
 fn dfs(
     match_idx: usize,
     matches: &[(usize, usize)],
-    points: &mut [u8; TEAM_COUNT],
-    wins: &mut [u8; TEAM_COUNT],
+    team_count: usize,
+    seat_scale: u64,
+    points: &mut [u8; MAX_TEAMS],
+    wins: &mut [u8; MAX_TEAMS],
     counts: &mut Counts,
 ) {
     if match_idx == matches.len() {
-        classify(points, wins, counts);
+        classify(team_count, seat_scale, points, wins, counts);
         return;
     }
 
     let (a, b) = matches[match_idx];
 
+    // Outcome 1: Team A wins
     points[a] += 2;
     wins[a] += 1;
-    dfs(match_idx + 1, matches, points, wins, counts);
+    dfs(match_idx + 1, matches, team_count, seat_scale, points, wins, counts);
     wins[a] -= 1;
     points[a] -= 2;
 
+    // Outcome 2: Team B wins
     points[b] += 2;
     wins[b] += 1;
-    dfs(match_idx + 1, matches, points, wins, counts);
+    dfs(match_idx + 1, matches, team_count, seat_scale, points, wins, counts);
     wins[b] -= 1;
     points[b] -= 2;
 
+    // Outcome 3: No Result (Tie/Washout)
     if ALLOW_NO_RESULTS {
         points[a] += 1;
         points[b] += 1;
-        dfs(match_idx + 1, matches, points, wins, counts);
+        dfs(match_idx + 1, matches, team_count, seat_scale, points, wins, counts);
         points[b] -= 1;
         points[a] -= 1;
     }
@@ -371,8 +441,8 @@ fn build_tasks(
     match_idx: usize,
     split_depth: usize,
     matches: &[(usize, usize)],
-    points: &mut [u8; TEAM_COUNT],
-    wins: &mut [u8; TEAM_COUNT],
+    points: &mut [u8; MAX_TEAMS],
+    wins: &mut [u8; MAX_TEAMS],
     tasks: &mut Vec<Task>,
 ) {
     if match_idx == split_depth {
@@ -407,24 +477,37 @@ fn build_tasks(
     }
 }
 
+fn format_with_commas(n: u64) -> String {
+    let mut s = n.to_string();
+    let mut i = s.len();
+    while i > 3 {
+        i -= 3;
+        s.insert(i, ',');
+    }
+    s
+}
+
 fn fmt_pct(numerator: u64, denominator: u64) -> String {
     format!("{:.4}%", numerator as f64 * 100.0 / denominator as f64)
 }
 
-fn fmt_scaled_pct(units: u64, total_scenarios: u64) -> String {
-    let denom = (total_scenarios as f64) * (SEAT_SCALE as f64);
+fn fmt_scaled_pct(units: u64, total_scenarios: u64, seat_scale: u64) -> String {
+    let denom = (total_scenarios as f64) * (seat_scale as f64);
     format!("{:.4}%", (units as f64) * 100.0 / denom)
 }
 
 fn main() {
     let parsed = parse_inputs();
+    let team_count = parsed.team_count;
+    let seat_scale = seat_scale_for_team_count(team_count);
+
     let base = if ALLOW_NO_RESULTS { 3u64 } else { 2u64 };
     let total_scenarios = pow_u64(base, parsed.matches.len());
     let num_threads = thread::available_parallelism().map(|p| p.get()).unwrap_or(4);
 
     let mut split_depth = 0usize;
     let mut task_count = 1u64;
-    while split_depth < parsed.matches.len() && task_count < (num_threads as u64 * 8) {
+    while split_depth < parsed.matches.len() && task_count < (num_threads as u64 * 512) {
         split_depth += 1;
         task_count = task_count.checked_mul(base).expect("Task count overflowed u64");
     }
@@ -438,13 +521,33 @@ fn main() {
     let tasks = Arc::new(tasks);
     let chunk_size = tasks.len().div_ceil(num_threads);
 
-    println!("IPL Playoff Probabilities");
-    println!("Teams: {}", TEAM_COUNT);
-    println!("Remaining matches: {}", matches.len());
-    println!("Outcome mode: {} per match", base);
-    println!("Total scenarios: {}", total_scenarios);
-    println!("Threads: {}", num_threads);
+    println!("{BOLD}{CYAN}=========== Current Standings ==========={RESET}");
+    println!("{BOLD}{YELLOW}{:>8} {:<6} {:>4} {:>4} {:>4} {:>4} {:>4}{RESET}", "Position", "Team", "M", "W", "L", "NR", "Pts");
+
+    let current_order = sort_teams(team_count, &parsed.points, &parsed.wins);
+    for (idx, &i) in current_order.iter().take(team_count).enumerate() {
+        println!("{:>8} {BOLD}{GREEN}{:<6}{RESET} {:>4} {:>4} {:>4} {:>4} {BOLD}{:>4}{RESET}",
+            idx + 1, // Position
+            parsed.team_names[i],
+            parsed.matches_played[i],
+            parsed.wins[i],
+            parsed.losses[i],
+            parsed.no_results[i],
+            parsed.points[i]
+        );
+    }
     println!();
+
+    println!("{BOLD}{CYAN}========= Playoff Probabilities ========={RESET}");
+    println!("{MAGENTA}Completed matches:{RESET} {}", parsed.completed_matches);
+    println!("{MAGENTA}Remaining matches:{RESET} {}", matches.len());
+    println!("{MAGENTA}Outcome mode:{RESET} {} per match", base);
+    println!("{MAGENTA}Total scenarios:{RESET} {}", format_with_commas(total_scenarios));
+    println!("{MAGENTA}Threads:{RESET} {}", num_threads);
+    println!();
+
+    let (tx, rx) = mpsc::channel();
+    let start_time = Instant::now();
 
     let mut handles = Vec::new();
     for t in 0..num_threads {
@@ -452,16 +555,21 @@ fn main() {
         if start >= tasks.len() {
             break;
         }
+
         let end = ((t + 1) * chunk_size).min(tasks.len());
         let tasks_clone = Arc::clone(&tasks);
         let matches_clone = Arc::clone(&matches);
+        let tx_clone = tx.clone(); // Clone the sender for this thread
 
         let handle = thread::spawn(move || {
             let mut local = Counts::default();
             for task in &tasks_clone[start..end] {
                 let mut local_points = task.points;
                 let mut local_wins = task.wins;
-                dfs(task.next_match, &matches_clone, &mut local_points, &mut local_wins, &mut local);
+                dfs(task.next_match, &matches_clone, team_count, seat_scale, &mut local_points, &mut local_wins, &mut local);
+
+                // Report task completion back to the main thread
+                let _ = tx_clone.send(());
             }
             local
         });
@@ -469,13 +577,46 @@ fn main() {
         handles.push(handle);
     }
 
+    // Drop the original sender so the channel closes when all threads finish
+    drop(tx);
+
+    // --- Progress Bar UI Loop ---
+    let total_tasks = tasks.len();
+    let mut completed_tasks = 0;
+
+    for _ in rx {
+        completed_tasks += 1;
+        let elapsed = start_time.elapsed().as_secs_f64();
+        let pct = (completed_tasks as f64) / (total_tasks as f64);
+
+        let eta = if pct > 0.0 {
+            (elapsed / pct) - elapsed
+        } else {
+            0.0
+        };
+
+        let bar_width = 40;
+        let filled = (pct * bar_width as f64) as usize;
+        let bar: String = (0..bar_width)
+            .map(|i| if i < filled { '=' } else if i == filled { '>' } else { ' ' })
+            .collect();
+
+        print!("\r{CYAN}Progress:{RESET} [{bar}] {BOLD}{:>5.1}%{RESET} | {YELLOW}Elapsed:{RESET} {:>5.1}s | {GREEN}ETA:{RESET} {:>5.1}s   ",
+            pct * 100.0, elapsed, eta);
+
+        // Force the terminal to draw the line immediately
+        io::stdout().flush().unwrap();
+    }
+    println!("\n"); // Move to a new line once complete
+
+    // Collect the final calculations from all threads
     let mut total_counts = Counts::default();
     for handle in handles {
         let local = handle.join().unwrap();
         total_counts.add_assign(&local);
     }
 
-    let mut rows: Vec<Row> = (0..TEAM_COUNT)
+    let mut rows: Vec<Row> = (0..team_count)
         .map(|i| Row {
             team: parsed.team_names[i].clone(),
             top2_pts: total_counts.top2_pts[i],
@@ -495,22 +636,18 @@ fn main() {
     });
 
     println!(
-        "{:<6} {:>14} {:>20} {:>14} {:>20}",
-        "Team",
-        "Top 2 Pts",
-        "Top 2 Pts+Good NRR",
-        "Top 4 Pts",
-        "Top 4 Pts+Good NRR",
+        "{BOLD}{YELLOW}{:<6} {:>14} {:>20} {:>14} {:>20}{RESET}",
+        "Team", "Top 2 Pts", "Top 2 Pts+Good NRR", "Top 4 Pts", "Top 4 Pts+Good NRR",
     );
 
     for row in rows {
         println!(
-            "{:<6} {:>14} {:>20} {:>14} {:>20}",
+            "{BOLD}{GREEN}{:<6}{RESET} {:>14} {:>20} {:>14} {:>20}",
             row.team,
             fmt_pct(row.top2_pts, total_scenarios),
-            fmt_scaled_pct(row.top2_good_nrr_units, total_scenarios),
+            fmt_scaled_pct(row.top2_good_nrr_units, total_scenarios, seat_scale),
             fmt_pct(row.top4_pts, total_scenarios),
-            fmt_scaled_pct(row.top4_good_nrr_units, total_scenarios),
+            fmt_scaled_pct(row.top4_good_nrr_units, total_scenarios, seat_scale),
         );
     }
 }
