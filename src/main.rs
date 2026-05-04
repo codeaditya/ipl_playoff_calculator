@@ -148,13 +148,16 @@ fn parse_args() -> Result<CliArgs, AppError> {
         .next()
         .unwrap_or_else(|| "ipl-playoff-calculator".to_string());
 
+    let interactive = io::stderr().is_terminal();
+    let colors = Colors::new(interactive);
+
     let mut file_path: Option<String> = None;
     let mut allow_no_results = false;
 
     for arg in args {
         match arg.as_str() {
             "--help" | "-h" => {
-                print_usage(&program_name);
+                print_usage(&program_name, &colors);
                 std::process::exit(0);
             }
             "--allow-no-results" => {
@@ -184,23 +187,47 @@ fn parse_args() -> Result<CliArgs, AppError> {
     })
 }
 
-fn print_usage(program_name: &str) {
-    eprintln!("{BOLD}{CYAN}IPL Playoff Calculator{RESET}\n");
+fn print_usage(program_name: &str, c: &Colors) {
     eprintln!(
-        "{BOLD}{YELLOW}Usage:{RESET} {} [--allow-no-results] <matches-file>",
-        program_name
+        "{bold}{cyan}IPL Playoff Calculator{reset}\n",
+        bold = c.bold,
+        cyan = c.cyan,
+        reset = c.reset
     );
-    eprintln!("\n{BOLD}Arguments:{RESET}");
+    eprintln!(
+        "{bold}{yellow}Usage:{reset} {} [--allow-no-results] <matches-file>",
+        program_name,
+        bold = c.bold,
+        yellow = c.yellow,
+        reset = c.reset
+    );
+    eprintln!("\n{bold}Arguments:{reset}", bold = c.bold, reset = c.reset);
     eprintln!("  <matches-file>       Path to the text file containing the schedule.");
     eprintln!(
         "  --allow-no-results   (Optional) Include ties/washouts (1 pt each) in future outcomes."
     );
-    eprintln!("\n{BOLD}Matches File Format:{RESET}");
+    eprintln!(
+        "\n{bold}Matches File Format:{reset}",
+        bold = c.bold,
+        reset = c.reset
+    );
     eprintln!("  - One match per line. Lines starting with '#' are ignored.");
-    eprintln!("  - {BOLD}Upcoming:{RESET}  Team A vs Team B");
-    eprintln!("  - {BOLD}Completed:{RESET} Team A vs Team B : Winner");
-    eprintln!("  - {BOLD}No Result:{RESET} Team A vs Team B : NR");
-    eprintln!("\n{BOLD}Example:{RESET}");
+    eprintln!(
+        "  - {bold}Upcoming:{reset}  Team A vs Team B",
+        bold = c.bold,
+        reset = c.reset
+    );
+    eprintln!(
+        "  - {bold}Completed:{reset} Team A vs Team B : Winner",
+        bold = c.bold,
+        reset = c.reset
+    );
+    eprintln!(
+        "  - {bold}No Result:{reset} Team A vs Team B : NR",
+        bold = c.bold,
+        reset = c.reset
+    );
+    eprintln!("\n{bold}Example:{reset}", bold = c.bold, reset = c.reset);
     eprintln!("  CSK vs RCB : CSK");
     eprintln!("  MI vs DC\n");
 }
