@@ -604,12 +604,22 @@ fn sort_teams(
     for i in 0..team_count {
         order[i] = i;
     }
-    order[..team_count].sort_unstable_by(|&a, &b| {
-        points[b]
-            .cmp(&points[a])
-            .then(wins[b].cmp(&wins[a]))
-            .then(a.cmp(&b))
-    });
+    // Simple insertion sort — faster than sort_unstable_by for n <= 10
+    for i in 1..team_count {
+        let key = order[i];
+        let mut j = i;
+        while j > 0 {
+            let prev = order[j - 1];
+            if points[prev] > points[key]
+                || (points[prev] == points[key] && wins[prev] >= wins[key])
+            {
+                break;
+            }
+            order[j] = prev;
+            j -= 1;
+        }
+        order[j] = key;
+    }
     order
 }
 
