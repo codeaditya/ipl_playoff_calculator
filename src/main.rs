@@ -59,7 +59,7 @@ impl Colors {
 // CONSTANTS
 // ================================================================
 
-const MAX_TEAMS: usize = 16;
+const MAX_TEAMS: usize = 10;
 const TASKS_PER_THREAD_TARGET: u64 = 512;
 const PROGRESS_POLL_INTERVAL_MS: u64 = 100;
 
@@ -76,22 +76,14 @@ const SLOT_NR: u8 = 3; // no result in match 0
 
 #[derive(Debug)]
 enum AppError {
-    Io(std::io::Error),
     Parse(String),
 }
 
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AppError::Io(e) => write!(f, "I/O error: {}", e),
-            AppError::Parse(msg) => write!(f, "Parse error: {}", msg),
+            AppError::Parse(msg) => write!(f, "{}", msg),
         }
-    }
-}
-
-impl From<std::io::Error> for AppError {
-    fn from(e: std::io::Error) -> Self {
-        AppError::Io(e)
     }
 }
 
@@ -126,11 +118,11 @@ const fn seat_scale_for_team_count(team_count: usize) -> u64 {
     scale
 }
 
-fn pow_u64(base: u64, exp: usize) -> Result<u64, AppError> {
-    (0..exp).try_fold(1u64, |acc, _| {
-        acc.checked_mul(base)
-            .ok_or_else(|| AppError::Parse("Scenario count overflowed u64".to_string()))
-    })
+/// Returns u64::MAX on overflow — callers use check_u64_overflow() as the gatekeeper.
+fn pow_u64(base: u64, exp: usize) -> u64 {
+    (0..exp)
+        .try_fold(1u64, |acc, _| acc.checked_mul(base))
+        .unwrap_or(u64::MAX)
 }
 
 // ================================================================
@@ -248,16 +240,19 @@ impl StandingState {
         self.points[team] += 2;
         self.wins[team] += 1;
     }
+
     #[inline]
     fn undo_win(&mut self, team: usize) {
         self.wins[team] -= 1;
         self.points[team] -= 2;
     }
+
     #[inline]
     fn record_no_result(&mut self, a: usize, b: usize) {
         self.points[a] += 1;
         self.points[b] += 1;
     }
+
     #[inline]
     fn undo_no_result(&mut self, a: usize, b: usize) {
         self.points[a] -= 1;
@@ -691,13 +686,13 @@ fn apply_cutoff(
 // ================================================================
 //
 // Key design: the DFS carries exactly ONE Counts, identical to the
-// original code.  The slot (which branch of match 0 applies to every
+// original code. The slot (which branch of match 0 applies to every
 // leaf in this sub-tree) is fixed at task-build time and stored in
-// Task::slot.  simulate_task() runs the standard DFS to get one Counts,
+// Task::slot. simulate_task() runs the standard DFS to get one Counts,
 // then routes it into the right AllCounts bucket with two += operations.
 // This means:
 //   - DFS stack frame size = unchanged (one Counts*)
-//   - Per-task merge cost  = 2× Counts AddAssign (negligible vs DFS work)
+//   - Per-task merge cost = 2× Counts AddAssign (negligible vs DFS work)
 //   - No slot checks inside the hot DFS loop at all
 
 #[derive(Clone)]
@@ -722,46 +717,40 @@ impl Simulator {
         self.matches.len()
     }
 
-    fn total_scenarios(&self) -> Result<u64, AppError> {
+    fn total_scenarios(&self) -> u64 {
         pow_u64(self.base, self.remaining_match_count())
     }
 
-    fn choose_split_depth(&self, num_threads: usize) -> Result<usize, AppError> {
+    fn choose_split_depth(&self, num_threads: usize) -> usize {
         let mut split_depth = 0usize;
         let mut task_count = 1u64;
         while split_depth < self.remaining_match_count()
             && task_count < (num_threads as u64 * TASKS_PER_THREAD_TARGET)
         {
             split_depth += 1;
-            task_count = task_count
-                .checked_mul(self.base)
-                .ok_or_else(|| AppError::Parse("Task count overflowed u64".to_string()))?;
+            task_count = task_count.saturating_mul(self.base);
         }
-        Ok(split_depth)
+        split_depth
     }
 
-    fn task_count_for_depth(&self, split_depth: usize) -> Result<u64, AppError> {
+    fn task_count_for_depth(&self, split_depth: usize) -> u64 {
         pow_u64(self.base, split_depth)
     }
 
-    fn scenarios_per_task(&self, split_depth: usize) -> Result<u64, AppError> {
+    fn scenarios_per_task(&self, split_depth: usize) -> u64 {
         pow_u64(self.base, self.remaining_match_count() - split_depth)
     }
 
     // ── Task building ──────────────────────────────────────────────────
     // Slot is resolved when match 0 is first branched and then propagated
-    // unchanged into every descendant task.  Tasks that start after match
+    // unchanged into every descendant task. Tasks that start after match
     // 0 already carry their final slot; the DFS never needs to check it.
 
-    fn build_tasks(
-        &self,
-        split_depth: usize,
-        initial_state: StandingState,
-    ) -> Result<Vec<Task>, AppError> {
-        let capacity = self.task_count_for_depth(split_depth)? as usize;
+    fn build_tasks(&self, split_depth: usize, initial_state: StandingState) -> Vec<Task> {
+        let capacity = self.task_count_for_depth(split_depth) as usize;
         let mut tasks = Vec::with_capacity(capacity);
         self.build_tasks_from(0, split_depth, initial_state, SLOT_UNSET, &mut tasks);
-        Ok(tasks)
+        tasks
     }
 
     fn build_tasks_from(
@@ -780,7 +769,6 @@ impl Simulator {
             });
             return;
         }
-
         let (a, b) = self.matches[match_idx];
 
         // Resolve slot exactly once: only when branching match 0.
@@ -966,7 +954,7 @@ impl ParallelSimulator {
         progress: &ProgressTracker,
         interactive: bool,
         colors: &Colors,
-    ) -> Result<AllCounts, AppError> {
+    ) -> AllCounts {
         let tasks = Arc::new(tasks);
         let next_task = Arc::new(AtomicUsize::new(0));
         let start_time = Instant::now();
@@ -1015,18 +1003,12 @@ impl ParallelSimulator {
         })
     }
 
-    fn collect_counts(
-        &self,
-        handles: Vec<thread::JoinHandle<AllCounts>>,
-    ) -> Result<AllCounts, AppError> {
+    fn collect_counts(&self, handles: Vec<thread::JoinHandle<AllCounts>>) -> AllCounts {
         let mut total = AllCounts::default();
         for handle in handles {
-            let local = handle
-                .join()
-                .map_err(|_| AppError::Parse("A worker thread panicked".to_string()))?;
-            total += &local;
+            total += &handle.join().expect("worker thread panicked");
         }
-        Ok(total)
+        total
     }
 }
 
@@ -1057,7 +1039,7 @@ impl Reporter {
     }
 
     fn probabilities_table_width(&self) -> usize {
-        // team_w + 4 pct columns + 5 space separators
+        // pos_w + team_w + 4 pct columns + 5 space separators
         self.layout.pos_w + self.layout.team_w + (4 * self.layout.pct_w) + 5
     }
 
@@ -1298,6 +1280,41 @@ fn determine_num_threads() -> usize {
         .unwrap_or(4)
 }
 
+/// Exits with a friendly message if the scenario count would overflow u64 counters.
+fn check_u64_overflow(seat_scale: u64, remaining: usize, base: u64) {
+    let total_scenarios = pow_u64(base, remaining);
+
+    // total_scenarios * seat_scale is the tighter bound (used by good_nrr_units).
+    if total_scenarios != u64::MAX && total_scenarios.checked_mul(seat_scale).is_some() {
+        return;
+    }
+
+    let safe_for_base = |b: u64| -> u64 {
+        let mut m = 0u64;
+        let mut v = seat_scale;
+        while let Some(next) = v.checked_mul(b) {
+            v = next;
+            m += 1;
+        }
+        m
+    };
+
+    println!(
+        "Too many scenarios to compute safely with {} matches remaining.\n\
+         \n\
+         Maximum supported remaining matches:\n\
+           Without --allow-no-results : {}\n\
+           With    --allow-no-results : {}\n\
+         \n\
+         Try after more matches are completed.",
+        remaining,
+        safe_for_base(2),
+        safe_for_base(3),
+    );
+
+    std::process::exit(0);
+}
+
 fn simulate_all(
     parsed: &ParsedInput,
     simulator: &Simulator,
@@ -1305,7 +1322,7 @@ fn simulate_all(
     interactive: bool,
     colors: &Colors,
     total_scenarios: u64,
-) -> Result<AllCounts, AppError> {
+) -> AllCounts {
     if simulator.remaining_match_count() == 0 {
         let mut counts = Counts::default();
         simulator
@@ -1313,12 +1330,12 @@ fn simulate_all(
             .classify(&parsed.initial_state, &mut counts);
         let mut all = AllCounts::default();
         all.overall += &counts;
-        return Ok(all);
+        return all;
     }
 
-    let split_depth = simulator.choose_split_depth(num_threads)?;
-    let tasks = simulator.build_tasks(split_depth, parsed.initial_state)?;
-    let scenarios_per_task = simulator.scenarios_per_task(split_depth)?;
+    let split_depth = simulator.choose_split_depth(num_threads);
+    let tasks = simulator.build_tasks(split_depth, parsed.initial_state);
+    let scenarios_per_task = simulator.scenarios_per_task(split_depth);
     let progress = ProgressTracker::new(total_scenarios, scenarios_per_task);
     let parallel = ParallelSimulator::new(simulator.clone(), num_threads);
 
@@ -1332,8 +1349,15 @@ fn run() -> Result<(), AppError> {
     let parsed = parse_inputs(&matches_input)?;
     let reporter = Reporter::new(&parsed, interactive);
     let simulator = Simulator::new(&parsed, cli.allow_no_results);
-    let total_scenarios = simulator.total_scenarios()?;
     let num_threads = determine_num_threads();
+
+    check_u64_overflow(
+        parsed.seat_scale,
+        simulator.remaining_match_count(),
+        simulator.base,
+    );
+
+    let total_scenarios = simulator.total_scenarios();
 
     reporter.print_current_standings(&parsed);
     reporter.print_simulation_header(
@@ -1349,7 +1373,6 @@ fn run() -> Result<(), AppError> {
         return Ok(());
     }
 
-    // Single pass — overall + all conditioned next-match counts.
     let all_counts = simulate_all(
         &parsed,
         &simulator,
@@ -1357,7 +1380,7 @@ fn run() -> Result<(), AppError> {
         interactive,
         reporter.colors(),
         total_scenarios,
-    )?;
+    );
 
     reporter.print_current_probabilities_heading(&parsed);
     reporter.print_results(
