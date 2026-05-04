@@ -228,35 +228,45 @@ fn print_usage(program_name: &str, c: &Colors) {
 // DATA MODELS
 // ================================================================
 
+const WIN_SCORE_DELTA: u16 = (2 << 8) | 1; // 2 points, 1 win
+const NR_SCORE_DELTA: u16 = (1 << 8) | 0; // 1 point, 0 wins
+
 #[derive(Clone, Copy, Default, Debug)]
 struct StandingState {
-    points: [u8; MAX_TEAMS],
-    wins: [u8; MAX_TEAMS],
+    score: [u16; MAX_TEAMS],
 }
 
 impl StandingState {
     #[inline]
     fn record_win(&mut self, team: usize) {
-        self.points[team] += 2;
-        self.wins[team] += 1;
+        self.score[team] += WIN_SCORE_DELTA;
     }
 
     #[inline]
     fn undo_win(&mut self, team: usize) {
-        self.wins[team] -= 1;
-        self.points[team] -= 2;
+        self.score[team] -= WIN_SCORE_DELTA;
     }
 
     #[inline]
     fn record_no_result(&mut self, a: usize, b: usize) {
-        self.points[a] += 1;
-        self.points[b] += 1;
+        self.score[a] += NR_SCORE_DELTA;
+        self.score[b] += NR_SCORE_DELTA;
     }
 
     #[inline]
     fn undo_no_result(&mut self, a: usize, b: usize) {
-        self.points[a] -= 1;
-        self.points[b] -= 1;
+        self.score[a] -= NR_SCORE_DELTA;
+        self.score[b] -= NR_SCORE_DELTA;
+    }
+
+    #[inline]
+    fn points(&self, team: usize) -> u8 {
+        (self.score[team] >> 8) as u8
+    }
+
+    #[inline]
+    fn wins(&self, team: usize) -> u8 {
+        (self.score[team] & 0xFF) as u8
     }
 }
 
@@ -315,14 +325,6 @@ struct Task {
     next_match: usize,
     state: StandingState,
     slot: u8, // SLOT_A / SLOT_B / SLOT_NR / SLOT_UNSET
-}
-
-#[derive(Clone, Copy, Default, Debug)]
-struct Group {
-    points: u8,
-    wins: u8,
-    members: [usize; MAX_TEAMS],
-    len: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -537,23 +539,6 @@ fn read_matches_file(path: &str) -> Result<String, AppError> {
 // RANKING
 // ================================================================
 
-struct CutoffCounts<'a> {
-    guaranteed: &'a mut [u64; MAX_TEAMS],
-    seat_aware_units: &'a mut [u64; MAX_TEAMS],
-}
-
-impl<'a> CutoffCounts<'a> {
-    fn new(
-        guaranteed: &'a mut [u64; MAX_TEAMS],
-        seat_aware_units: &'a mut [u64; MAX_TEAMS],
-    ) -> Self {
-        Self {
-            guaranteed,
-            seat_aware_units,
-        }
-    }
-}
-
 #[derive(Clone)]
 struct Ranker {
     team_count: usize,
@@ -570,31 +555,73 @@ impl Ranker {
 
     #[inline]
     fn classify(&self, state: &StandingState, counts: &mut Counts) {
-        let order = sort_teams(self.team_count, &state.points, &state.wins);
-        let (groups, group_count) =
-            build_groups(&order, self.team_count, &state.points, &state.wins);
-        apply_cutoff(
-            &groups,
-            group_count,
-            2,
-            self.seat_scale,
-            CutoffCounts::new(&mut counts.top2_pts, &mut counts.top2_good_nrr_units),
-        );
-        apply_cutoff(
-            &groups,
-            group_count,
-            4,
-            self.seat_scale,
-            CutoffCounts::new(&mut counts.top4_pts, &mut counts.top4_good_nrr_units),
-        );
+        let order = sort_teams(self.team_count, &state.score);
+
+        let mut start = 0;
+        let mut placed_above = 0;
+
+        while start < self.team_count {
+            let mut end = start + 1;
+            let score_val = state.score[order[start]];
+
+            // Group teams with identical points and wins
+            while end < self.team_count && state.score[order[end]] == score_val {
+                end += 1;
+            }
+
+            let group_len = end - start;
+            let group_len_u64 = group_len as u64;
+
+            // --- TOP 2 Cutoff ---
+            let spots_top2 = if placed_above >= 2 {
+                0
+            } else {
+                (2 - placed_above).min(group_len)
+            };
+            let units_top2 = if spots_top2 == 0 {
+                0
+            } else {
+                (spots_top2 as u64 * self.seat_scale) / group_len_u64
+            };
+
+            // --- TOP 4 Cutoff ---
+            let spots_top4 = if placed_above >= 4 {
+                0
+            } else {
+                (4 - placed_above).min(group_len)
+            };
+            let units_top4 = if spots_top4 == 0 {
+                0
+            } else {
+                (spots_top4 as u64 * self.seat_scale) / group_len_u64
+            };
+
+            // Assign stats directly to the combined counts struct
+            for idx in start..end {
+                let team = order[idx];
+
+                if units_top2 > 0 {
+                    counts.top2_good_nrr_units[team] += units_top2;
+                }
+                if spots_top2 == group_len {
+                    counts.top2_pts[team] += 1;
+                }
+
+                if units_top4 > 0 {
+                    counts.top4_good_nrr_units[team] += units_top4;
+                }
+                if spots_top4 == group_len {
+                    counts.top4_pts[team] += 1;
+                }
+            }
+
+            start = end;
+            placed_above += group_len;
+        }
     }
 }
 
-fn sort_teams(
-    team_count: usize,
-    points: &[u8; MAX_TEAMS],
-    wins: &[u8; MAX_TEAMS],
-) -> [usize; MAX_TEAMS] {
+fn sort_teams(team_count: usize, score: &[u16; MAX_TEAMS]) -> [usize; MAX_TEAMS] {
     let mut order = [0usize; MAX_TEAMS];
     for i in 0..team_count {
         order[i] = i;
@@ -605,9 +632,8 @@ fn sort_teams(
         let mut j = i;
         while j > 0 {
             let prev = order[j - 1];
-            if points[prev] > points[key]
-                || (points[prev] == points[key] && wins[prev] >= wins[key])
-            {
+            // High byte = points, low byte = wins. Direct comparison handles both.
+            if score[prev] >= score[key] {
                 break;
             }
             order[j] = prev;
@@ -616,69 +642,6 @@ fn sort_teams(
         order[j] = key;
     }
     order
-}
-
-fn build_groups(
-    order: &[usize; MAX_TEAMS],
-    team_count: usize,
-    points: &[u8; MAX_TEAMS],
-    wins: &[u8; MAX_TEAMS],
-) -> ([Group; MAX_TEAMS], usize) {
-    let mut groups = [Group::default(); MAX_TEAMS];
-    let mut group_count = 0usize;
-    for &team in order.iter().take(team_count) {
-        if group_count > 0 {
-            let last = &mut groups[group_count - 1];
-            if last.points == points[team] && last.wins == wins[team] {
-                last.members[last.len] = team;
-                last.len += 1;
-                continue;
-            }
-        }
-        let mut group = Group {
-            points: points[team],
-            wins: wins[team],
-            members: [0; MAX_TEAMS],
-            len: 1,
-        };
-        group.members[0] = team;
-        groups[group_count] = group;
-        group_count += 1;
-    }
-    (groups, group_count)
-}
-
-fn apply_cutoff(
-    groups: &[Group; MAX_TEAMS],
-    group_count: usize,
-    cutoff: usize,
-    seat_scale: u64,
-    counts: CutoffCounts<'_>,
-) {
-    let mut placed_above = 0usize;
-    for group in groups.iter().take(group_count) {
-        let spots_here = if placed_above >= cutoff {
-            0
-        } else {
-            (cutoff - placed_above).min(group.len)
-        };
-        let fully_inside_cutoff = spots_here == group.len;
-        let seat_units_per_team = if spots_here == 0 {
-            0u64
-        } else {
-            (spots_here as u64) * seat_scale / (group.len as u64)
-        };
-        for idx in 0..group.len {
-            let team = group.members[idx];
-            if seat_units_per_team > 0 {
-                counts.seat_aware_units[team] += seat_units_per_team;
-            }
-            if fully_inside_cutoff {
-                counts.guaranteed[team] += 1;
-            }
-        }
-        placed_above += group.len;
-    }
 }
 
 // ================================================================
@@ -1071,11 +1034,7 @@ impl Reporter {
             team_w = self.layout.team_w,
             stat_w = self.layout.stat_w,
         );
-        let current_order = sort_teams(
-            parsed.team_count,
-            &parsed.initial_state.points,
-            &parsed.initial_state.wins,
-        );
+        let current_order = sort_teams(parsed.team_count, &parsed.initial_state.score);
         for (idx, &team_idx) in current_order.iter().take(parsed.team_count).enumerate() {
             println!(
                 "{:>pos_w$} {}{:team_w$}{} {:>stat_w$} {:>stat_w$} {:>stat_w$} {:>stat_w$} {:>stat_w$}",
@@ -1084,10 +1043,10 @@ impl Reporter {
                 parsed.team_names[team_idx],
                 self.colors.reset,
                 parsed.matches_played[team_idx],
-                parsed.initial_state.wins[team_idx],
+                parsed.initial_state.wins(team_idx),
                 parsed.losses[team_idx],
                 parsed.no_results[team_idx],
-                parsed.initial_state.points[team_idx],
+                parsed.initial_state.points(team_idx),
                 pos_w = self.layout.pos_w,
                 team_w = self.layout.team_w,
                 stat_w = self.layout.stat_w,
