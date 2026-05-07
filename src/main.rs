@@ -1168,54 +1168,16 @@ impl DpSimulator {
         pow_u64(self.base, self.remaining_match_count())
     }
 
-    /// Handles the unique logic for processing match 0 to seed the initial state array
-    fn seed_first_match(&self, initial_state: &StandingState) -> Vec<(u128, [u64; 3])> {
-        let mut first_gen = Vec::new();
-        if let Some(&(a0, b0)) = self.matches.first() {
-            let mut sa = *initial_state;
-            sa.record_win(a0);
-
-            let mut sb = *initial_state;
-            sb.record_win(b0);
-
-            first_gen.push((sa.score, [1, 0, 0]));
-            if sa.score != sb.score {
-                first_gen.push((sb.score, [0, 1, 0]));
-            } else {
-                first_gen[0].1[1] = 1;
-            }
-
-            if self.allow_no_results {
-                let mut snr = *initial_state;
-                snr.record_no_result(a0, b0);
-                first_gen.push((snr.score, [0, 0, 1]));
-
-                first_gen.sort_unstable_by_key(|&(s, _)| s);
-                first_gen.dedup_by(|next, curr| {
-                    if curr.0 == next.0 {
-                        curr.1[0] += next.1[0];
-                        curr.1[1] += next.1[1];
-                        curr.1[2] += next.1[2];
-                        true
-                    } else {
-                        false
-                    }
-                });
-            }
-        } else {
-            first_gen.push((initial_state.score, [0, 0, 0]));
-        }
-        first_gen
-    }
-
-    /// Executes the 3-way merge and handles memory chunk dropping for a single match iteration
+    // ================================================================
+    // CORE MERGE LOGIC
+    // ================================================================
     fn process_next_match(
         &self,
-        mut states: Vec<Vec<(u128, [u64; 3])>>,
+        mut states: Vec<Vec<(u128, u64)>>,
         total_states: usize,
         a: usize,
         b: usize,
-    ) -> (Vec<Vec<(u128, [u64; 3])>>, usize) {
+    ) -> (Vec<Vec<(u128, u64)>>, usize) {
         const CHUNK_SHIFT: usize = 18;
         const CHUNK_MASK: usize = 0x3FFFF;
         const CHUNK_SIZE: usize = 262_144;
@@ -1246,29 +1208,28 @@ impl DpSimulator {
         let mut current_chunk = 0;
         let mut last_freed_chunk = 0;
 
-        // 3-Way merge algorithm
         while idx_a < len || idx_b < len || idx_nr < len {
             let min_idx = idx_a.min(idx_b).min(idx_nr);
             let safe_to_free_chunk = min_idx >> CHUNK_SHIFT;
             while last_freed_chunk < safe_to_free_chunk {
-                states[last_freed_chunk] = Vec::new(); // Instantly frees memory to the OS
+                states[last_freed_chunk] = Vec::new(); // Instantly frees memory
                 last_freed_chunk += 1;
             }
 
             let state_a = if idx_a < len {
                 states[idx_a >> CHUNK_SHIFT][idx_a & CHUNK_MASK]
             } else {
-                (u128::MAX, [0, 0, 0])
+                (u128::MAX, 0)
             };
             let state_b = if idx_b < len {
                 states[idx_b >> CHUNK_SHIFT][idx_b & CHUNK_MASK]
             } else {
-                (u128::MAX, [0, 0, 0])
+                (u128::MAX, 0)
             };
             let state_nr = if idx_nr < len {
                 states[idx_nr >> CHUNK_SHIFT][idx_nr & CHUNK_MASK]
             } else {
-                (u128::MAX, [0, 0, 0])
+                (u128::MAX, 0)
             };
 
             let val_a = if idx_a < len {
@@ -1288,24 +1249,18 @@ impl DpSimulator {
             };
 
             let min_val = val_a.min(val_b).min(val_nr);
-            let mut w = [0, 0, 0];
+            let mut w = 0;
 
             if val_a == min_val {
-                w[0] += state_a.1[0];
-                w[1] += state_a.1[1];
-                w[2] += state_a.1[2];
+                w += state_a.1;
                 idx_a += 1;
             }
             if val_b == min_val {
-                w[0] += state_b.1[0];
-                w[1] += state_b.1[1];
-                w[2] += state_b.1[2];
+                w += state_b.1;
                 idx_b += 1;
             }
             if val_nr == min_val {
-                w[0] += state_nr.1[0];
-                w[1] += state_nr.1[1];
-                w[2] += state_nr.1[2];
+                w += state_nr.1;
                 idx_nr += 1;
             }
 
@@ -1320,40 +1275,35 @@ impl DpSimulator {
         (next_states, next_len)
     }
 
+    // ================================================================
+    // SIMULATION LOOP
+    // ================================================================
     fn build_states(
         &self,
-        initial_state: &StandingState,
+        branch_initial_state: StandingState,
+        matches: &[(usize, usize)],
         interactive: bool,
         colors: &Colors,
-    ) -> (Vec<Vec<(u128, [u64; 3])>>, usize, Instant) {
-        let total_matches = self.remaining_match_count();
-        let start_time = Instant::now();
-
-        // states maps a packed score vector to [if_a, if_b, if_nr].
-        // overall is never stored — it is always reconstructed as if_a + if_b + if_nr.
-        //
-        // To avoid carrying an extra "untagged" slot, match 0 is peeled out of the
-        // loop and used to seed the [if_a, if_b, if_nr] weights directly. From
-        // match 1 onward every scenario already carries a slot tag.
-        let mut states: Vec<Vec<(u128, [u64; 3])>> = Vec::new();
-
-        let first_gen = self.seed_first_match(initial_state);
-        let mut total_states = first_gen.len();
-        states.push(first_gen);
+        global_start_time: Instant,
+    ) -> (Vec<Vec<(u128, u64)>>, usize) {
+        // Add 1 to account for Match 0 which was processed in the wrapper
+        let total_matches = matches.len() + 1;
+        let mut total_states = 1;
+        let mut states: Vec<Vec<(u128, u64)>> = vec![vec![(branch_initial_state.score, 1)]];
 
         if interactive {
             draw_progress(
                 ProgressPhase::DpSimulating {
-                    match_idx: if total_matches > 0 { 1 } else { 0 },
+                    match_idx: 1, // Start at match 1 since match 0 is done
                     total_matches,
                     state_count: total_states,
                 },
                 colors,
-                start_time,
+                global_start_time,
             );
         }
 
-        for (idx, &(a, b)) in self.matches.iter().enumerate().skip(1) {
+        for (idx, &(a, b)) in matches.iter().enumerate() {
             let (next_states, next_len) = self.process_next_match(states, total_states, a, b);
             states = next_states;
             total_states = next_len;
@@ -1361,35 +1311,35 @@ impl DpSimulator {
             if interactive {
                 draw_progress(
                     ProgressPhase::DpSimulating {
-                        match_idx: idx + 1,
+                        match_idx: idx + 2, // idx is 0-based, +1 for the loop, +1 for Match 0
                         total_matches,
                         state_count: total_states,
                     },
                     colors,
-                    start_time,
+                    global_start_time,
                 );
             }
         }
 
-        (states, total_states, start_time)
+        (states, total_states)
     }
 
-    fn classify_states(
+    // ================================================================
+    // PARALLEL CLASSIFICATION
+    // ================================================================
+    fn classify_states_parallel(
         &self,
-        states: Vec<Vec<(u128, [u64; 3])>>,
+        states: Vec<Vec<(u128, u64)>>,
         total_states: usize,
         interactive: bool,
         colors: &Colors,
-        start_time: Instant,
-    ) -> AllCounts {
-        let has_next = !self.matches.is_empty();
+        global_start_time: Instant,
+    ) -> Counts {
         let num_threads = determine_num_threads();
-
         // Wrap the chunked states in a thread-safe Iterator
         // Using into_iter() means chunks are consumed and their memory is instantly freed when a thread is done with them.
         let chunk_iter = Arc::new(std::sync::Mutex::new(states.into_iter()));
         let states_done = Arc::new(AtomicUsize::new(0));
-
         let mut handles = Vec::with_capacity(num_threads);
 
         for _ in 0..num_threads {
@@ -1398,7 +1348,7 @@ impl DpSimulator {
             let ranker = self.ranker.clone(); // Ranker is cheap to clone
 
             handles.push(thread::spawn(move || {
-                let mut local_all = AllCounts::default();
+                let mut local_counts = Counts::default();
 
                 loop {
                     // Safely pull the next chunk from the queue
@@ -1420,44 +1370,17 @@ impl DpSimulator {
                         let mut leaf = Counts::default();
                         ranker.classify(&state, &mut leaf);
 
-                        let (w1, w2, w3) = (w[0], w[1], w[2]);
-                        let w0 = w1 + w2 + w3; // reconstruct overall
-
                         for j in 0..ranker.team_count {
-                            local_all.overall.top2_pts[j] += leaf.top2_pts[j] * w0;
-                            local_all.overall.top2_good_nrr_units[j] +=
-                                leaf.top2_good_nrr_units[j] * w0;
-                            local_all.overall.top4_pts[j] += leaf.top4_pts[j] * w0;
-                            local_all.overall.top4_good_nrr_units[j] +=
-                                leaf.top4_good_nrr_units[j] * w0;
-                            if has_next {
-                                local_all.if_a_wins.top2_pts[j] += leaf.top2_pts[j] * w1;
-                                local_all.if_a_wins.top2_good_nrr_units[j] +=
-                                    leaf.top2_good_nrr_units[j] * w1;
-                                local_all.if_a_wins.top4_pts[j] += leaf.top4_pts[j] * w1;
-                                local_all.if_a_wins.top4_good_nrr_units[j] +=
-                                    leaf.top4_good_nrr_units[j] * w1;
-                                local_all.if_b_wins.top2_pts[j] += leaf.top2_pts[j] * w2;
-                                local_all.if_b_wins.top2_good_nrr_units[j] +=
-                                    leaf.top2_good_nrr_units[j] * w2;
-                                local_all.if_b_wins.top4_pts[j] += leaf.top4_pts[j] * w2;
-                                local_all.if_b_wins.top4_good_nrr_units[j] +=
-                                    leaf.top4_good_nrr_units[j] * w2;
-                                local_all.if_nr.top2_pts[j] += leaf.top2_pts[j] * w3;
-                                local_all.if_nr.top2_good_nrr_units[j] +=
-                                    leaf.top2_good_nrr_units[j] * w3;
-                                local_all.if_nr.top4_pts[j] += leaf.top4_pts[j] * w3;
-                                local_all.if_nr.top4_good_nrr_units[j] +=
-                                    leaf.top4_good_nrr_units[j] * w3;
-                            }
+                            local_counts.top2_pts[j] += leaf.top2_pts[j] * w;
+                            local_counts.top2_good_nrr_units[j] += leaf.top2_good_nrr_units[j] * w;
+                            local_counts.top4_pts[j] += leaf.top4_pts[j] * w;
+                            local_counts.top4_good_nrr_units[j] += leaf.top4_good_nrr_units[j] * w;
                         }
                     }
-
                     // Update progress counter
                     states_done.fetch_add(chunk_len, Ordering::Relaxed);
                 }
-
-                local_all
+                local_counts
             }));
         }
 
@@ -1473,7 +1396,7 @@ impl DpSimulator {
                             total_states,
                         },
                         colors,
-                        start_time,
+                        global_start_time,
                     );
                     last_drawn = done;
                 }
@@ -1486,20 +1409,104 @@ impl DpSimulator {
         }
 
         // Wait for all threads to finish and aggregate the results
-        let mut all = AllCounts::default();
+        let mut final_counts = Counts::default();
         for handle in handles {
-            all += &handle.join().unwrap();
+            final_counts += &handle.join().unwrap();
+        }
+
+        final_counts
+    }
+
+    // ================================================================
+    // BRANCH WRAPPER
+    // ================================================================
+    fn simulate_and_classify_branch(
+        &self,
+        branch_initial_state: StandingState,
+        matches: &[(usize, usize)],
+        branch_name: &str,
+        interactive: bool,
+        colors: &Colors,
+        global_start_time: Instant,
+    ) -> Counts {
+        if interactive {
+            println!("{}{}{} ==========", colors.cyan, branch_name, colors.reset);
+        }
+
+        let (states, total_states) = self.build_states(
+            branch_initial_state,
+            matches,
+            interactive,
+            colors,
+            global_start_time,
+        );
+        // Print a newline so the Simulating Progress bar is saved and Classifying gets a fresh line
+        println!();
+        self.classify_states_parallel(states, total_states, interactive, colors, global_start_time)
+    }
+
+    // ================================================================
+    // MAIN ORCHESTRATOR
+    // ================================================================
+    fn run(&self, initial_state: &StandingState, interactive: bool, colors: &Colors) -> AllCounts {
+        if self.matches.is_empty() {
+            let mut leaf = Counts::default();
+            self.ranker.classify(initial_state, &mut leaf);
+            let mut all = AllCounts::default();
+            all.overall += &leaf;
+            return all;
+        }
+
+        let global_start_time = Instant::now();
+        let (a0, b0) = self.matches[0];
+        let remaining_matches = &self.matches[1..];
+        let mut all = AllCounts::default();
+
+        // Run Branch A
+        let mut state_a = *initial_state;
+        state_a.record_win(a0);
+        let counts_a = self.simulate_and_classify_branch(
+            state_a,
+            remaining_matches,
+            "==== Branch: Team A Wins ",
+            interactive,
+            colors,
+            global_start_time,
+        );
+        all.if_a_wins += &counts_a;
+        all.overall += &counts_a;
+
+        // Run Branch B
+        let mut state_b = *initial_state;
+        state_b.record_win(b0);
+        let counts_b = self.simulate_and_classify_branch(
+            state_b,
+            remaining_matches,
+            "==== Branch: Team B Wins ",
+            interactive,
+            colors,
+            global_start_time,
+        );
+        all.if_b_wins += &counts_b;
+        all.overall += &counts_b;
+
+        // Run Branch NR (If allowed)
+        if self.allow_no_results {
+            let mut state_nr = *initial_state;
+            state_nr.record_no_result(a0, b0);
+            let counts_nr = self.simulate_and_classify_branch(
+                state_nr,
+                remaining_matches,
+                "==== Branch: No Result ",
+                interactive,
+                colors,
+                global_start_time,
+            );
+            all.if_nr += &counts_nr;
+            all.overall += &counts_nr;
         }
 
         all
-    }
-
-    fn run(&self, initial_state: &StandingState, interactive: bool, colors: &Colors) -> AllCounts {
-        let (states, total_states, start_time) =
-            self.build_states(initial_state, interactive, colors);
-        // Print a newline so the Simulating Progress bar is saved and Classifying gets a fresh line
-        println!();
-        self.classify_states(states, total_states, interactive, colors, start_time)
     }
 }
 
