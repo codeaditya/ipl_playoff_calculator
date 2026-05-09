@@ -76,6 +76,7 @@ const SLOT_NR: u8 = 3; // no result in match 0
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Algorithm {
+    Auto,
     Dfs,
     Dp,
 }
@@ -83,6 +84,7 @@ enum Algorithm {
 impl fmt::Display for Algorithm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Algorithm::Auto => write!(f, "AUTO"),
             Algorithm::Dfs => write!(f, "DFS"),
             Algorithm::Dp => write!(f, "DP"),
         }
@@ -164,7 +166,7 @@ fn parse_args() -> Result<CliArgs, AppError> {
 
     let mut file_path: Option<String> = None;
     let mut allow_no_results = false;
-    let mut algorithm = Algorithm::Dfs;
+    let mut algorithm = Algorithm::Auto;
 
     for arg in args {
         match arg.as_str() {
@@ -174,6 +176,9 @@ fn parse_args() -> Result<CliArgs, AppError> {
             }
             "--allow-no-results" => {
                 allow_no_results = true;
+            }
+            "--algo=auto" | "--algo=AUTO" => {
+                algorithm = Algorithm::Auto;
             }
             "--algo=dfs" | "--algo=DFS" => {
                 algorithm = Algorithm::Dfs;
@@ -214,45 +219,74 @@ fn print_usage(program_name: &str, c: &Colors) {
         reset = c.reset
     );
     eprintln!(
-        "{bold}{yellow}Usage:{reset} {} [--allow-no-results] [--algo=dfs|dp] <matches-file>",
-        program_name,
+        "{bold}{yellow}Usage:{reset} {magenta}{prog}{reset} {cyan}[--allow-no-results]{reset} {cyan}[--algo=auto|dfs|dp]{reset} {green}<matches-file>{reset}",
+        bold = c.bold,
+        yellow = c.yellow,
+        reset = c.reset,
+        magenta = c.magenta,
+        prog = program_name,
+        cyan = c.cyan,
+        green = c.green,
+    );
+    eprintln!(
+        "\n{bold}{yellow}Arguments:{reset}",
         bold = c.bold,
         yellow = c.yellow,
         reset = c.reset
     );
-    eprintln!("\n{bold}Arguments:{reset}", bold = c.bold, reset = c.reset);
-    eprintln!("  <matches-file>       Path to the text file containing the schedule.");
     eprintln!(
-        "  --allow-no-results   (Optional) Include ties/washouts (1 pt each) in future outcomes."
+        "  {green}<matches-file>{reset}       Path to the text file containing the schedule.",
+        green = c.green,
+        reset = c.reset
     );
     eprintln!(
-        "  --algo=dfs           (Default) DFS simulation: low RAM (~<5 MB), slower for large match counts."
+        "  {cyan}--allow-no-results{reset}   (Optional) Include ties/washouts (1 pt each) in future outcomes.",
+        cyan = c.cyan,
+        reset = c.reset
     );
     eprintln!(
-        "  --algo=dp            DP simulation: faster for large match counts, but uses significantly more RAM."
+        "  {cyan}--algo=auto{reset}          (Default) Dynamically scales between pure DP and Hybrid DFS-DP based on available system RAM.",
+        cyan = c.cyan,
+        reset = c.reset
     );
     eprintln!(
-        "\n{bold}Matches File Format:{reset}",
+        "  {cyan}--algo=dfs{reset}           DFS simulation: low RAM (~<5 MB), slower for large match counts.",
+        cyan = c.cyan,
+        reset = c.reset
+    );
+    eprintln!(
+        "  {cyan}--algo=dp{reset}            DP simulation: faster for large match counts, but uses significantly more RAM.",
+        cyan = c.cyan,
+        reset = c.reset
+    );
+    eprintln!(
+        "\n{bold}{yellow}Matches File Format:{reset}",
         bold = c.bold,
+        yellow = c.yellow,
         reset = c.reset
     );
     eprintln!("  - One match per line. Lines starting with '#' are ignored.");
     eprintln!(
-        "  - {bold}Upcoming:{reset}  Team A vs Team B",
-        bold = c.bold,
-        reset = c.reset
+        "  - {magenta}Upcoming:{reset}  Team A vs Team B",
+        magenta = c.magenta,
+        reset = c.reset,
     );
     eprintln!(
-        "  - {bold}Completed:{reset} Team A vs Team B : Winner",
-        bold = c.bold,
-        reset = c.reset
+        "  - {magenta}Completed:{reset} Team A vs Team B : Winner",
+        magenta = c.magenta,
+        reset = c.reset,
     );
     eprintln!(
-        "  - {bold}No Result:{reset} Team A vs Team B : NR",
+        "  - {magenta}No Result:{reset} Team A vs Team B : NR",
+        magenta = c.magenta,
+        reset = c.reset,
+    );
+    eprintln!(
+        "\n{bold}{yellow}Example:{reset}",
         bold = c.bold,
+        yellow = c.yellow,
         reset = c.reset
     );
-    eprintln!("\n{bold}Example:{reset}", bold = c.bold, reset = c.reset);
     eprintln!("  CSK vs RCB : CSK");
     eprintln!("  MI vs DC\n");
 }
@@ -1016,7 +1050,7 @@ pub enum ProgressPhase {
 
 fn draw_progress(phase: ProgressPhase, colors: &Colors, start_time: Instant) {
     let mem_str = current_rss_bytes()
-        .map(|b| fmt_mem(b))
+        .map(fmt_mem)
         .unwrap_or_else(|| "N/A".to_string());
 
     let elapsed = start_time.elapsed().as_secs_f64();
@@ -1143,6 +1177,7 @@ fn draw_progress(phase: ProgressPhase, colors: &Colors, start_time: Instant) {
 //
 // Progress: emits a per-match progress bar (one tick per match).
 
+#[derive(Clone)]
 struct DpSimulator {
     matches: Vec<(usize, usize)>,
     ranker: Ranker,
@@ -1429,10 +1464,7 @@ impl DpSimulator {
         colors: &Colors,
         global_start_time: Instant,
     ) -> Counts {
-        if interactive {
-            println!("{}{}{} ==========", colors.cyan, branch_name, colors.reset);
-        }
-
+        println!("{}{}{} ==========", colors.cyan, branch_name, colors.reset);
         let (states, total_states) = self.build_states(
             branch_initial_state,
             matches,
@@ -1507,6 +1539,249 @@ impl DpSimulator {
         }
 
         all
+    }
+}
+
+// ================================================================
+// HYBRID STRATEGY OPTIMIZER & SIMULATOR
+// ================================================================
+
+struct HybridStrategy {
+    remaining: usize,
+    optimal_dp_size: usize,
+    free_ram_mb: f64,
+    usable_ram_mb: f64,
+    est_peak_ram: f64,
+    est_compute_time: f64,
+}
+
+fn get_free_system_ram_mb() -> f64 {
+    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+        for line in text.lines() {
+            if line.starts_with("MemAvailable:")
+                && let Some(kb_str) = line.split_whitespace().nth(1)
+                && let Ok(kb) = kb_str.parse::<f64>()
+            {
+                return kb / 1024.0;
+            }
+        }
+    }
+    2000.0 // Default to 2 GB if not on Linux or undetected
+}
+
+fn estimate_dp_cost(d: usize, base: u64) -> (f64, f64) {
+    let (ram_growth, time_growth): (f64, f64) = if base == 3 {
+        (1.45, 1.45)
+    } else {
+        (1.28, 1.18)
+    };
+    let diff = d as f64 - 20.0;
+    let ram_mb = 10.0 * ram_growth.powf(diff);
+    let time_s = 0.2 * time_growth.powf(diff);
+    (ram_mb, time_s)
+}
+
+fn optimize_hybrid_strategy(remaining: usize, base: u64) -> HybridStrategy {
+    let free_ram_mb = get_free_system_ram_mb();
+
+    // SAFE RAM CHECK: If > 1.5GB, leave 1GB for the OS. If very tight, use exactly 50%.
+    let usable_ram_mb = if free_ram_mb > 1500.0 {
+        (free_ram_mb - 1000.0).max(free_ram_mb * 0.5)
+    } else {
+        free_ram_mb * 0.5
+    };
+
+    let mut optimal_dp_size = 1;
+    let mut est_peak_ram = 0.0;
+    let mut est_compute_time = 0.0;
+
+    // OPTIMAL STRATEGY: Greedy Max-DP
+    for d in (1..=remaining).rev() {
+        let (ram_req, time_req) = estimate_dp_cost(d, base);
+        if ram_req <= usable_ram_mb {
+            let dfs_branches = (base as f64).powi((remaining - d) as i32);
+            optimal_dp_size = d;
+            est_peak_ram = ram_req;
+            est_compute_time = dfs_branches * time_req;
+            break;
+        }
+    }
+
+    HybridStrategy {
+        remaining,
+        optimal_dp_size,
+        free_ram_mb,
+        usable_ram_mb,
+        est_peak_ram,
+        est_compute_time,
+    }
+}
+
+#[derive(Clone)]
+struct HybridSimulator {
+    matches: Vec<(usize, usize)>,
+    allow_no_results: bool,
+    base: u64,
+    dp_simulator: DpSimulator,
+}
+
+impl HybridSimulator {
+    fn new(parsed: &ParsedInput, allow_no_results: bool) -> Self {
+        Self {
+            matches: parsed.matches.clone(),
+            allow_no_results,
+            base: if allow_no_results { 3 } else { 2 },
+            dp_simulator: DpSimulator::new(parsed, allow_no_results),
+        }
+    }
+
+    fn build_dfs_tasks(
+        &self,
+        match_idx: usize,
+        split_depth: usize,
+        state: StandingState,
+        slot: u8,
+        tasks: &mut Vec<Task>,
+    ) {
+        if match_idx == split_depth {
+            tasks.push(Task {
+                next_match: match_idx,
+                state,
+                slot,
+            });
+            return;
+        }
+        let (a, b) = self.matches[match_idx];
+        let (slot_a, slot_b, slot_nr) = if slot == SLOT_UNSET {
+            (SLOT_A, SLOT_B, SLOT_NR)
+        } else {
+            (slot, slot, slot)
+        };
+
+        let mut sa = state;
+        sa.record_win(a);
+        self.build_dfs_tasks(match_idx + 1, split_depth, sa, slot_a, tasks);
+
+        let mut sb = state;
+        sb.record_win(b);
+        self.build_dfs_tasks(match_idx + 1, split_depth, sb, slot_b, tasks);
+
+        if self.allow_no_results {
+            let mut snr = state;
+            snr.record_no_result(a, b);
+            self.build_dfs_tasks(match_idx + 1, split_depth, snr, slot_nr, tasks);
+        }
+    }
+
+    fn single_pass_dp(
+        &self,
+        start_state: StandingState,
+        remaining_matches: &[(usize, usize)],
+        interactive: bool,
+        colors: &Colors,
+    ) -> Counts {
+        let start_time = Instant::now();
+        let (states, total_states) = self.dp_simulator.build_states(
+            start_state,
+            remaining_matches,
+            interactive,
+            colors,
+            start_time,
+        );
+        println!();
+        self.dp_simulator.classify_states_parallel(
+            states,
+            total_states,
+            interactive,
+            colors,
+            start_time,
+        )
+    }
+
+    fn run(
+        &self,
+        initial_state: &StandingState,
+        interactive: bool,
+        reporter: &Reporter,
+    ) -> AllCounts {
+        let remaining = self.matches.len();
+        if remaining == 0 {
+            return self
+                .dp_simulator
+                .run(initial_state, interactive, reporter.colors());
+        }
+
+        let strategy = optimize_hybrid_strategy(remaining, self.base);
+        let split_depth = remaining - strategy.optimal_dp_size;
+
+        reporter.print_hybrid_strategy(&strategy);
+
+        if split_depth == 0 {
+            println!(
+                "{}Auto Optimizer: Fitting entirely in RAM. Falling back to Pure DP.{}\n",
+                reporter.colors().green,
+                reporter.colors().reset
+            );
+            return self
+                .dp_simulator
+                .run(initial_state, interactive, reporter.colors());
+        }
+
+        println!(
+            "{}Auto Optimizer: Proceeding with Hybrid DFS-DP{}",
+            reporter.colors().green,
+            reporter.colors().reset
+        );
+        println!(
+            "Splitting first {} matches via DFS. DP running on remaining {} matches.",
+            split_depth, strategy.optimal_dp_size
+        );
+        println!();
+
+        let global_start_time = Instant::now();
+        let mut tasks = Vec::new();
+        self.build_dfs_tasks(0, split_depth, *initial_state, SLOT_UNSET, &mut tasks);
+
+        let mut final_all = AllCounts::default();
+
+        for (idx, task) in tasks.iter().enumerate() {
+            println!(
+                "{bold}{cyan}==== Hybrid Task {}/{} ===={reset}",
+                idx + 1,
+                tasks.len(),
+                bold = reporter.colors().bold,
+                cyan = reporter.colors().cyan,
+                reset = reporter.colors().reset
+            );
+
+            let dp_matches = &self.matches[task.next_match..];
+
+            let result_counts =
+                self.single_pass_dp(task.state, dp_matches, interactive, reporter.colors());
+
+            let after_elapsed = global_start_time.elapsed().as_secs_f64();
+            println!(
+                "{green}Task {}/{} Completed | Total Elapsed: {:.1}s{reset}\n",
+                idx + 1,
+                tasks.len(),
+                after_elapsed,
+                green = reporter.colors().green,
+                reset = reporter.colors().reset
+            );
+
+            // Accumulate the global total
+            final_all.overall += &result_counts;
+
+            // Route to the specific branch totals for the Next Match Impact table
+            match task.slot {
+                SLOT_A => final_all.if_a_wins += &result_counts,
+                SLOT_B => final_all.if_b_wins += &result_counts,
+                SLOT_NR => final_all.if_nr += &result_counts,
+                _ => {}
+            }
+        }
+
+        final_all
     }
 }
 
@@ -1632,6 +1907,42 @@ impl Reporter {
             println!(
                 "  {}Threads           :{} {}",
                 self.colors.magenta, self.colors.reset, num_threads
+            );
+        }
+        println!();
+    }
+
+    fn print_hybrid_strategy(&self, strategy: &HybridStrategy) {
+        println!(
+            "{}=== Hybrid Optimizer Strategy ==={}",
+            self.colors.cyan, self.colors.reset
+        );
+        println!(
+            "  {}Free System RAM   :{} {:.0} MB (Usable: {:.0} MB)",
+            self.colors.magenta, self.colors.reset, strategy.free_ram_mb, strategy.usable_ram_mb
+        );
+        println!(
+            "  {}Optimal DP Size   :{} {} matches (DFS will split {})",
+            self.colors.magenta,
+            self.colors.reset,
+            strategy.optimal_dp_size,
+            strategy.remaining - strategy.optimal_dp_size
+        );
+        println!(
+            "  {}Est. Compute Time :{} {:.1} seconds",
+            self.colors.magenta, self.colors.reset, strategy.est_compute_time
+        );
+        if strategy.est_peak_ram >= 1024.0 {
+            println!(
+                "  {}Est. Peak RAM     :{} {:.1} GB",
+                self.colors.magenta,
+                self.colors.reset,
+                strategy.est_peak_ram / 1024.0
+            );
+        } else {
+            println!(
+                "  {}Est. Peak RAM     :{} {:.0} MB",
+                self.colors.magenta, self.colors.reset, strategy.est_peak_ram
             );
         }
         println!();
@@ -1895,6 +2206,40 @@ fn run() -> Result<(), AppError> {
     reporter.print_current_standings(&parsed);
 
     match cli.algorithm {
+        Algorithm::Auto => {
+            let hybrid = HybridSimulator::new(&parsed, cli.allow_no_results);
+            let remaining_matches = parsed.matches.len();
+            let base = if cli.allow_no_results { 3 } else { 2 };
+
+            check_u64_overflow(parsed.seat_scale, remaining_matches, base);
+            let total_scenarios = pow_u64(base, remaining_matches);
+
+            reporter.print_simulation_header(
+                Algorithm::Auto,
+                parsed.completed_matches,
+                remaining_matches,
+                base,
+                total_scenarios,
+                num_threads,
+            );
+
+            if remaining_matches == 0 {
+                println!("No remaining matches to simulate.");
+                return Ok(());
+            }
+
+            let all_counts = hybrid.run(&parsed.initial_state, interactive, &reporter);
+
+            print_probability_results(
+                &reporter,
+                &parsed,
+                &all_counts,
+                total_scenarios,
+                base,
+                cli.allow_no_results,
+            );
+        }
+
         Algorithm::Dfs => {
             let simulator = DfsSimulator::new(&parsed, cli.allow_no_results);
             check_u64_overflow(
@@ -1976,8 +2321,9 @@ fn run() -> Result<(), AppError> {
 }
 
 fn main() {
+    let colors = Colors::new(io::stderr().is_terminal());
     if let Err(e) = run() {
-        eprintln!("{}Error:{} {}", YELLOW, RESET, e);
+        eprintln!("{}Error:{} {}", colors.yellow, colors.reset, e);
         std::process::exit(1);
     }
 }
