@@ -73,9 +73,9 @@ const SLOT_NR: u8 = 3; // no result in match 0
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Algorithm {
-    Auto,
     Dfs,
     Dp,
+    Auto,
 }
 
 impl fmt::Display for Algorithm {
@@ -148,8 +148,9 @@ fn pow_u64(base: u64, exp: usize) -> u64 {
 
 struct CliArgs {
     file_path: String,
-    allow_no_results: bool,
     algorithm: Algorithm,
+    allow_no_results: bool,
+    calibrate_dp: bool,
 }
 
 fn parse_args() -> Result<CliArgs, AppError> {
@@ -162,8 +163,9 @@ fn parse_args() -> Result<CliArgs, AppError> {
     let colors = Colors::new(interactive);
 
     let mut file_path: Option<String> = None;
-    let mut allow_no_results = false;
     let mut algorithm = Algorithm::Auto;
+    let mut allow_no_results = false;
+    let mut calibrate_dp = false;
 
     for arg in args {
         match arg.as_str() {
@@ -174,15 +176,16 @@ fn parse_args() -> Result<CliArgs, AppError> {
             "--allow-no-results" => {
                 allow_no_results = true;
             }
-            "--algo=auto" | "--algo=AUTO" => {
-                algorithm = Algorithm::Auto;
-            }
             "--algo=dfs" | "--algo=DFS" => {
                 algorithm = Algorithm::Dfs;
             }
             "--algo=dp" | "--algo=DP" => {
                 algorithm = Algorithm::Dp;
             }
+            "--algo=auto" | "--algo=AUTO" => {
+                algorithm = Algorithm::Auto;
+            }
+            "--calibrate-dp" => calibrate_dp = true,
             _ if arg.starts_with('-') => {
                 return Err(AppError::Parse(format!("Unknown flag: {}", arg)));
             }
@@ -203,8 +206,9 @@ fn parse_args() -> Result<CliArgs, AppError> {
 
     Ok(CliArgs {
         file_path,
-        allow_no_results,
         algorithm,
+        allow_no_results,
+        calibrate_dp,
     })
 }
 
@@ -242,17 +246,28 @@ fn print_usage(program_name: &str, c: &Colors) {
         reset = c.reset
     );
     eprintln!(
-        "  {cyan}--algo=auto{reset}          (Default) Dynamically scales between pure DP and Hybrid DFS-DP based on available system RAM.",
-        cyan = c.cyan,
-        reset = c.reset
-    );
-    eprintln!(
         "  {cyan}--algo=dfs{reset}           DFS simulation: low RAM (~<5 MB), slower for large match counts.",
         cyan = c.cyan,
         reset = c.reset
     );
     eprintln!(
         "  {cyan}--algo=dp{reset}            DP simulation: faster for large match counts, but uses significantly more RAM.",
+        cyan = c.cyan,
+        reset = c.reset
+    );
+    eprintln!(
+        "  {cyan}--algo=auto{reset}          (Default) Dynamically scales between pure DP and Hybrid DFS-DP based on available system RAM.",
+        cyan = c.cyan,
+        reset = c.reset
+    );
+    eprintln!(
+        "\n{bold}{yellow}Dev Only Arguments:{reset}",
+        bold = c.bold,
+        yellow = c.yellow,
+        reset = c.reset
+    );
+    eprintln!(
+        "  {cyan}--calibrate-dp{reset}       Use to calibrate the RAM usage and compute time for DP simulation",
         cyan = c.cyan,
         reset = c.reset
     );
@@ -771,7 +786,7 @@ impl DfsSimulator {
         pow_u64(self.base, self.remaining_match_count() - split_depth)
     }
 
-    // ── Task building ──────────────────────────────────────────────────
+    // == Task building =======================================================
     // Slot is resolved when match 0 is first branched and then propagated
     // unchanged into every descendant task. Tasks that start after match
     // 0 already carry their final slot; the DFS never needs to check it.
@@ -823,7 +838,7 @@ impl DfsSimulator {
         }
     }
 
-    // ── Per-task execution ─────────────────────────────────────────────
+    // == Per-task execution ==================================================
     // The DFS carries a single Counts. After it completes, simulate_task
     // routes the result into AllCounts with two cheap AddAssign calls
     // (overall + one conditioned bucket).
@@ -1024,33 +1039,6 @@ impl ProgressTracker {
             thread::sleep(Duration::from_millis(PROGRESS_POLL_INTERVAL_MS));
         }
         println!("\n");
-    }
-}
-
-// ================================================================
-// MEMORY HELPERS
-// ================================================================
-
-/// Returns current RSS (resident set size) in bytes by reading
-/// /proc/self/status on Linux. Returns None on unsupported platforms.
-fn current_rss_bytes() -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/self/status").ok()?;
-    for line in text.lines() {
-        if line.starts_with("VmRSS:") {
-            let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-            return Some(kb * 1024);
-        }
-    }
-    None
-}
-
-fn fmt_mem(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else {
-        format!("{:.0} KB", bytes as f64 / 1024.0)
     }
 }
 
@@ -1404,9 +1392,7 @@ impl DpSimulator {
         pow_u64(self.base, self.remaining_match_count())
     }
 
-    // ================================================================
-    // CORE MERGE LOGIC
-    // ================================================================
+    /// == CORE MERGE LOGIC ===================================================
     fn process_next_match(
         &self,
         mut states: Vec<Vec<(u128, u64)>>,
@@ -1511,9 +1497,6 @@ impl DpSimulator {
         (next_states, next_len)
     }
 
-    // ================================================================
-    // SIMULATION LOOP
-    // ================================================================
     fn build_states(
         &self,
         branch_initial_state: StandingState,
@@ -1567,9 +1550,6 @@ impl DpSimulator {
         (states, total_states)
     }
 
-    // ================================================================
-    // PARALLEL CLASSIFICATION
-    // ================================================================
     fn classify_states_parallel(
         &self,
         states: Vec<Vec<(u128, u64)>>,
@@ -1660,9 +1640,6 @@ impl DpSimulator {
         final_counts
     }
 
-    // ================================================================
-    // BRANCH WRAPPER
-    // ================================================================
     fn simulate_and_classify_branch(
         &self,
         branch_initial_state: StandingState,
@@ -1686,9 +1663,6 @@ impl DpSimulator {
         self.classify_states_parallel(states, total_states, interactive, colors, global_start_time)
     }
 
-    // ================================================================
-    // MAIN ORCHESTRATOR
-    // ================================================================
     fn run(&self, initial_state: &StandingState, interactive: bool, colors: &Colors) -> AllCounts {
         if self.matches.is_empty() {
             let mut leaf = Counts::default();
@@ -1749,10 +1723,92 @@ impl DpSimulator {
 
         all
     }
+
+    pub fn run_calibration(&self, initial_state: StandingState, colors: &Colors) {
+        let total = self.matches.len();
+        println!(
+            "╔══════════════ DP Calibration ({} total matches, base={}) ═══════════════╗",
+            total, self.base
+        );
+        println!(
+            " {:>2} │ {:>12} {:>10} {:>9} │ {:>7} {:>10} {:>9}",
+            "d", "States", "Real RAM", "Real Time", "Auto DP", "Est RAM", "Est Time"
+        );
+        println!("{}", "─".repeat(74));
+
+        let baseline_rss = current_rss_bytes().unwrap_or(0);
+
+        for d in 1..=total {
+            let dp_matches = &self.matches[total - d..];
+
+            // Spawn a background thread that polls RSS every 50ms and records the peak.
+            let peak_rss_atomic = Arc::new(AtomicU64::new(0));
+            let stop_flag = Arc::new(AtomicU64::new(0));
+            {
+                let peak_rss_clone = Arc::clone(&peak_rss_atomic);
+                let stop_clone = Arc::clone(&stop_flag);
+                std::thread::spawn(move || {
+                    loop {
+                        if let Some(rss) = current_rss_bytes() {
+                            peak_rss_clone.fetch_max(rss, Ordering::Relaxed);
+                        }
+                        if stop_clone.load(Ordering::Relaxed) != 0 {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                });
+            }
+
+            let start = Instant::now();
+
+            // build_states: the main RAM consumer.
+            let (states, total_states) = self.build_states(
+                initial_state,
+                dp_matches,
+                false,
+                colors,
+                Instant::now(),
+                true, // is_hybrid=true: no extra match peel
+            );
+
+            // classify_states_parallel: ~30-50% of total time, must be included.
+            let _counts =
+                self.classify_states_parallel(states, total_states, false, colors, Instant::now());
+
+            let elapsed = start.elapsed().as_secs_f64();
+
+            // Stop the poller and read peak.
+            stop_flag.store(1, Ordering::Relaxed);
+            // Give poller one last chance to fire before we read.
+            std::thread::sleep(Duration::from_millis(60));
+            let peak_rss = peak_rss_atomic.load(Ordering::Relaxed);
+            let peak_ram = peak_rss.saturating_sub(baseline_rss);
+
+            // Multiply by base: pure DP runs `base` branches sequentially.
+            let total_time = elapsed * self.base as f64;
+
+            // Auto Strategy parameters if we had exactly `d` matches remaining
+            let hybrid = optimize_hybrid_strategy(d + 1, self.base);
+
+            println!(
+                " {:>2} │ {:>12} {:>10} {:>8.2}s │ {:>7} {:>10} {:>8.2}s",
+                d,
+                format_with_commas(total_states as u64),
+                fmt_mem(peak_ram),
+                total_time,
+                hybrid.optimal_dp_size,
+                fmt_mem(hybrid.est_peak_ram_mb as u64 * 1024 * 1024),
+                hybrid.est_compute_time
+            );
+        }
+
+        println!("╚{}╝", "═".repeat(73));
+    }
 }
 
 // ================================================================
-// HYBRID STRATEGY OPTIMIZER & SIMULATOR
+// HYBRID STRATEGY OPTIMIZER & AUTO SIMULATOR
 // ================================================================
 
 struct HybridStrategy {
@@ -1760,34 +1816,44 @@ struct HybridStrategy {
     optimal_dp_size: usize,
     free_ram_mb: f64,
     usable_ram_mb: f64,
-    est_peak_ram: f64,
+    est_peak_ram_mb: f64,
     est_compute_time: f64,
 }
 
-fn get_free_system_ram_mb() -> f64 {
-    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
-        for line in text.lines() {
-            if line.starts_with("MemAvailable:")
-                && let Some(kb_str) = line.split_whitespace().nth(1)
-                && let Ok(kb) = kb_str.parse::<f64>()
-            {
-                return kb / 1024.0;
-            }
-        }
-    }
-    2000.0 // Default to 2 GB if not on Linux or undetected
-}
-
+/// d = Remaining matches that would purely run on DP Simulation excluding the seed match
 fn estimate_dp_cost(d: usize, base: u64) -> (f64, f64) {
-    let (ram_growth, time_growth): (f64, f64) = if base == 3 {
-        (1.45, 1.45)
+    // Determine the performance scaling factor based on threads.
+    // Derived from 12-thread (Ryzen) vs 4-thread (Kaggle) memory bandwidth scaling.
+    // The equation models throughput (M states/s): Thr(t) = A + B * threads
+    // We normalize against the 12-thread baseline (factor = 1.0).
+    let num_threads = determine_num_threads();
+    let thr_12t = 1.77 + 0.40 * 12.0;
+    let thr_current = 1.77 + 0.40 * (num_threads as f64);
+    let time_scale_factor = thr_12t / thr_current;
+
+    if base >= 3 {
+        // Calibrated from --calibrate run (base=3, 18 total matches (including the seed match)).
+        // Anchor: remaining=18; d=17.
+        // Growth rates: RAM ~2.168x per match, Time ~2.166x per match.
+        // RAM includes a strict 15% safety pad to prevent OOM.
+        // Time uses the exact 12-thread curve fit.
+        let diff = d as f64 - 18.0;
+        let ram_mb = 4_660.0 * 2.168_f64.powf(diff) * 1.2725;
+        let base_time_s = 20.0 * 2.166_f64.powf(diff);
+
+        (ram_mb, base_time_s * time_scale_factor)
     } else {
-        (1.28, 1.18)
-    };
-    let diff = d as f64 - 20.0;
-    let ram_mb = 10.0 * ram_growth.powf(diff);
-    let time_s = 0.2 * time_growth.powf(diff);
-    (ram_mb, time_s)
+        // Calibrated from --calibrate run (base=2, 46 total matches (including the seed match)).
+        // Anchor: remaining=40; d=39.
+        // Growth rates: RAM ~1.222x per match, Time ~1.242x per match.
+        // RAM includes a strict 15% safety pad to prevent OOM.
+        // Time uses the exact 12-thread curve fit.
+        let diff = d as f64 - 40.0;
+        let ram_mb = 1_925.0 * 1.222_f64.powf(diff) * 1.15;
+        let base_time_s = 10.0 * 1.242_f64.powf(diff);
+
+        (ram_mb, base_time_s * time_scale_factor)
+    }
 }
 
 fn optimize_hybrid_strategy(remaining: usize, base: u64) -> HybridStrategy {
@@ -1801,17 +1867,25 @@ fn optimize_hybrid_strategy(remaining: usize, base: u64) -> HybridStrategy {
     };
 
     let mut optimal_dp_size = 1;
-    let mut est_peak_ram = 0.0;
+    let mut est_peak_ram_mb = 0.0;
     let mut est_compute_time = 0.0;
 
     // OPTIMAL STRATEGY: Greedy Max-DP
     for d in (1..=remaining).rev() {
-        let (ram_req, time_req) = estimate_dp_cost(d, base);
-        if ram_req <= usable_ram_mb {
+        let (ram_req_mb, time_req) = if d == remaining {
+            estimate_dp_cost(d - 1, base)
+        } else {
+            estimate_dp_cost(d, base)
+        };
+        if ram_req_mb <= usable_ram_mb {
             let dfs_branches = (base as f64).powi((remaining - d) as i32);
             optimal_dp_size = d;
-            est_peak_ram = ram_req;
-            est_compute_time = dfs_branches * time_req;
+            est_peak_ram_mb = ram_req_mb;
+            est_compute_time = if optimal_dp_size == remaining {
+                time_req
+            } else {
+                dfs_branches * time_req / base as f64
+            };
             break;
         }
     }
@@ -1821,20 +1895,20 @@ fn optimize_hybrid_strategy(remaining: usize, base: u64) -> HybridStrategy {
         optimal_dp_size,
         free_ram_mb,
         usable_ram_mb,
-        est_peak_ram,
+        est_peak_ram_mb,
         est_compute_time,
     }
 }
 
 #[derive(Clone)]
-struct HybridSimulator {
+struct AutoSimulator {
     matches: Vec<(usize, usize)>,
     allow_no_results: bool,
     base: u64,
     dp_simulator: DpSimulator,
 }
 
-impl HybridSimulator {
+impl AutoSimulator {
     fn new(parsed: &ParsedInput, allow_no_results: bool) -> Self {
         Self {
             matches: parsed.matches.clone(),
@@ -2153,19 +2227,10 @@ impl Reporter {
             "  {}Est. Compute Time :{} {:.1} seconds",
             self.colors.magenta, self.colors.reset, strategy.est_compute_time
         );
-        if strategy.est_peak_ram >= 1024.0 {
-            println!(
-                "  {}Est. Peak RAM     :{} {:.1} GB",
-                self.colors.magenta,
-                self.colors.reset,
-                strategy.est_peak_ram / 1024.0
-            );
-        } else {
-            println!(
-                "  {}Est. Peak RAM     :{} {:.0} MB",
-                self.colors.magenta, self.colors.reset, strategy.est_peak_ram
-            );
-        }
+        println!(
+            "  {}Est. Peak RAM     :{} {:.0} MB",
+            self.colors.magenta, self.colors.reset, strategy.est_peak_ram_mb
+        );
         println!();
     }
 
@@ -2321,9 +2386,9 @@ impl Reporter {
 // ================================================================
 
 enum SimulationRunner {
-    Hybrid(HybridSimulator),
     Dfs(DfsSimulator),
     Dp(DpSimulator),
+    Auto(AutoSimulator),
 }
 
 impl SimulationRunner {
@@ -2337,9 +2402,9 @@ impl SimulationRunner {
         interactive: bool,
     ) -> Result<(), AppError> {
         let (remaining, base_val, total_scenarios) = match self {
-            SimulationRunner::Hybrid(h) => (h.remaining_match_count(), h.base, h.total_scenarios()),
             SimulationRunner::Dfs(d) => (d.remaining_match_count(), d.base, d.total_scenarios()),
             SimulationRunner::Dp(d) => (d.remaining_match_count(), d.base, d.total_scenarios()),
+            SimulationRunner::Auto(h) => (h.remaining_match_count(), h.base, h.total_scenarios()),
         };
 
         check_u64_overflow(parsed.seat_scale, remaining, base_val);
@@ -2350,11 +2415,7 @@ impl SimulationRunner {
             remaining,
             base_val,
             total_scenarios,
-            if matches!(algorithm, Algorithm::Dp) {
-                1
-            } else {
-                num_threads
-            },
+            num_threads,
         );
 
         if remaining == 0 {
@@ -2363,7 +2424,6 @@ impl SimulationRunner {
         }
 
         let all_counts = match self {
-            SimulationRunner::Hybrid(h) => h.run(&parsed.initial_state, interactive, reporter),
             SimulationRunner::Dfs(d) => d.run(
                 &parsed.initial_state,
                 num_threads,
@@ -2371,6 +2431,7 @@ impl SimulationRunner {
                 reporter.colors(),
             ),
             SimulationRunner::Dp(d) => d.run(&parsed.initial_state, interactive, reporter.colors()),
+            SimulationRunner::Auto(h) => h.run(&parsed.initial_state, interactive, reporter),
         };
 
         reporter.print_probability_results(
@@ -2386,8 +2447,43 @@ impl SimulationRunner {
 }
 
 // ================================================================
-// FORMATTING HELPERS
+// MEMORY AND FORMATTING HELPERS
 // ================================================================
+
+/// Returns current RSS (resident set size) in bytes by reading
+/// /proc/self/status on Linux. Returns None on unsupported platforms.
+fn current_rss_bytes() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in text.lines() {
+        if line.starts_with("VmRSS:") {
+            let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+fn get_free_system_ram_mb() -> f64 {
+    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+        for line in text.lines() {
+            if line.starts_with("MemAvailable:")
+                && let Some(kb_str) = line.split_whitespace().nth(1)
+                && let Ok(kb) = kb_str.parse::<f64>()
+            {
+                return kb / 1024.0;
+            }
+        }
+    }
+    2000.0 // Default to 2 GB if not on Linux or undetected
+}
+
+fn fmt_mem(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    }
+}
 
 fn format_with_commas(n: u64) -> String {
     let mut s = n.to_string();
@@ -2467,12 +2563,17 @@ fn run() -> Result<(), AppError> {
     let parsed = parse_inputs(&matches_input)?;
     let reporter = Reporter::new(&parsed, interactive);
     let num_threads = determine_num_threads();
+    if cli.calibrate_dp {
+        let dp = DpSimulator::new(&parsed, cli.allow_no_results);
+        dp.run_calibration(parsed.initial_state, reporter.colors());
+        return Ok(());
+    }
     let runner = match cli.algorithm {
-        Algorithm::Auto => {
-            SimulationRunner::Hybrid(HybridSimulator::new(&parsed, cli.allow_no_results))
-        }
         Algorithm::Dfs => SimulationRunner::Dfs(DfsSimulator::new(&parsed, cli.allow_no_results)),
         Algorithm::Dp => SimulationRunner::Dp(DpSimulator::new(&parsed, cli.allow_no_results)),
+        Algorithm::Auto => {
+            SimulationRunner::Auto(AutoSimulator::new(&parsed, cli.allow_no_results))
+        }
     };
     runner.run_simulation(
         cli.algorithm,
