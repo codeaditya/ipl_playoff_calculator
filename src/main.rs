@@ -309,6 +309,16 @@ fn print_usage(program_name: &str, c: &Colors) {
 
 const TEAM_BITS: usize = 10;
 const TEAM_MASK: u128 = 0x3FF;
+const TEAM_SHIFTS: [u32; MAX_TEAMS] = {
+    let mut shifts = [0u32; MAX_TEAMS];
+    let mut i = 0;
+    while i < MAX_TEAMS {
+        shifts[i] = (i * TEAM_BITS) as u32;
+        i += 1;
+    }
+    shifts
+};
+
 const WIN_SCORE_DELTA: u128 = (2 << 4) | 1; // 33 (2 points, 1 win)
 const NR_SCORE_DELTA: u128 = (1 << 4) | 0; // 16 (1 point, 0 wins)
 
@@ -632,10 +642,24 @@ impl Ranker {
 
     #[inline]
     fn classify(&self, state: &StandingState, counts: &mut Counts) {
-        // Unpack u128 into a fast array for the sorting and grouping logic
+        // --- OPTIMIZED SCORE EXTRACTION ---
+        // Extract all team scores in one pass.
+        // Using a fixed-size array and const shifts lets the compiler
+        // see the full unroll and emit vectorized code where possible.
+        let raw = state.score;
         let mut scores = [0u16; MAX_TEAMS];
+
+        // This loop has no data dependency between iterations
+        // (each reads `raw` independently) — the compiler can unroll
+        // and/or vectorize this on any target.
         for (i, score) in scores.iter_mut().enumerate().take(self.team_count) {
-            *score = ((state.score >> (i * TEAM_BITS)) & TEAM_MASK) as u16;
+            *score = ((raw >> TEAM_SHIFTS[i]) & TEAM_MASK) as u16;
+        }
+
+        // Only consider active teams — zero out the rest explicitly
+        // so sort_teams sees clean data without a branch.
+        for score in scores.iter_mut().take(MAX_TEAMS).skip(self.team_count) {
+            *score = 0;
         }
 
         let order = sort_teams(self.team_count, &scores);
@@ -708,13 +732,13 @@ fn sort_teams(team_count: usize, scores: &[u16; MAX_TEAMS]) -> [usize; MAX_TEAMS
     }
     for i in 1..team_count {
         let key = order[i];
+        let key_score = scores[key];
         let mut j = i;
-        while j > 0 {
-            let prev = order[j - 1];
-            if scores[prev] >= scores[key] {
-                break;
-            }
-            order[j] = prev;
+        // Using while with an explicit condition the compiler can
+        // convert to a cmov (conditional move) instead of a branch
+        // eliminating branch mispredictions for small N
+        while j > 0 && scores[order[j - 1]] < key_score {
+            order[j] = order[j - 1];
             j -= 1;
         }
         order[j] = key;
