@@ -908,10 +908,11 @@ impl DfsSimulator {
     fn run(
         &self,
         initial_state: &StandingState,
-        num_threads: usize,
+        reporter: &Reporter,
         interactive: bool,
-        colors: &Colors,
+        num_threads: usize,
     ) -> AllCounts {
+        let colors = reporter.colors();
         if self.remaining_match_count() == 0 {
             let mut counts = Counts::default();
             self.ranker.classify(initial_state, &mut counts);
@@ -1687,7 +1688,13 @@ impl DpSimulator {
         self.classify_states_parallel(states, total_states, interactive, colors, global_start_time)
     }
 
-    fn run(&self, initial_state: &StandingState, interactive: bool, colors: &Colors) -> AllCounts {
+    fn run(
+        &self,
+        initial_state: &StandingState,
+        reporter: &Reporter,
+        interactive: bool,
+    ) -> AllCounts {
+        let colors = reporter.colors();
         if self.matches.is_empty() {
             let mut leaf = Counts::default();
             self.ranker.classify(initial_state, &mut leaf);
@@ -1695,6 +1702,7 @@ impl DpSimulator {
             all.overall += &leaf;
             return all;
         }
+        reporter.print_dp_estimate(self.matches.len().saturating_sub(1), self.base);
 
         let global_start_time = Instant::now();
         let (a0, b0) = self.matches[0];
@@ -1813,7 +1821,7 @@ impl DpSimulator {
             let total_time = elapsed * self.base as f64;
 
             // Auto Strategy parameters if we had exactly `d` matches remaining
-            let hybrid = optimize_hybrid_strategy(d + 1, self.base);
+            let auto_optimized_strategy = get_auto_optimized_strategy(d + 1, self.base);
 
             println!(
                 " {:>2} │ {:>12} {:>10} {:>8.2}s │ {:>7} {:>10} {:>8.2}s",
@@ -1821,9 +1829,9 @@ impl DpSimulator {
                 format_with_commas(total_states as u64),
                 fmt_mem(peak_ram),
                 total_time,
-                hybrid.optimal_dp_size,
-                fmt_mem(hybrid.est_peak_ram_mb as u64 * 1024 * 1024),
-                hybrid.est_compute_time
+                auto_optimized_strategy.optimal_dp_size,
+                fmt_mem(auto_optimized_strategy.est_peak_ram_mb as u64 * 1024 * 1024),
+                auto_optimized_strategy.est_compute_time
             );
         }
 
@@ -1832,10 +1840,10 @@ impl DpSimulator {
 }
 
 // ================================================================
-// HYBRID STRATEGY OPTIMIZER & AUTO SIMULATOR
+// AUTO STRATEGY OPTIMIZER & AUTO SIMULATOR
 // ================================================================
 
-struct HybridStrategy {
+struct AutoOptimizedStrategy {
     remaining: usize,
     optimal_dp_size: usize,
     free_ram_mb: f64,
@@ -1880,15 +1888,9 @@ fn estimate_dp_cost(d: usize, base: u64) -> (f64, f64) {
     }
 }
 
-fn optimize_hybrid_strategy(remaining: usize, base: u64) -> HybridStrategy {
+fn get_auto_optimized_strategy(remaining: usize, base: u64) -> AutoOptimizedStrategy {
     let free_ram_mb = get_free_system_ram_mb();
-
-    // SAFE RAM CHECK: If > 1.5GB, leave 1GB for the OS. If very tight, use exactly 50%.
-    let usable_ram_mb = if free_ram_mb > 1500.0 {
-        (free_ram_mb - 1000.0).max(free_ram_mb * 0.5)
-    } else {
-        free_ram_mb * 0.5
-    };
+    let usable_ram_mb = get_usable_ram_mb(free_ram_mb);
 
     let mut optimal_dp_size = 1;
     let mut est_peak_ram_mb = 0.0;
@@ -1914,7 +1916,7 @@ fn optimize_hybrid_strategy(remaining: usize, base: u64) -> HybridStrategy {
         }
     }
 
-    HybridStrategy {
+    AutoOptimizedStrategy {
         remaining,
         optimal_dp_size,
         free_ram_mb,
@@ -2017,20 +2019,18 @@ impl AutoSimulator {
     fn run(
         &self,
         initial_state: &StandingState,
-        interactive: bool,
         reporter: &Reporter,
+        interactive: bool,
     ) -> AllCounts {
         let remaining = self.matches.len();
         if remaining == 0 {
-            return self
-                .dp_simulator
-                .run(initial_state, interactive, reporter.colors());
+            return self.dp_simulator.run(initial_state, reporter, interactive);
         }
 
-        let strategy = optimize_hybrid_strategy(remaining, self.base);
+        let strategy = get_auto_optimized_strategy(remaining, self.base);
         let split_depth = remaining - strategy.optimal_dp_size;
 
-        reporter.print_hybrid_strategy(&strategy);
+        reporter.print_auto_optimized_strategy(&strategy);
 
         if split_depth == 0 {
             println!(
@@ -2038,9 +2038,7 @@ impl AutoSimulator {
                 reporter.colors().green,
                 reporter.colors().reset
             );
-            return self
-                .dp_simulator
-                .run(initial_state, interactive, reporter.colors());
+            return self.dp_simulator.run(initial_state, reporter, interactive);
         }
 
         println!(
@@ -2231,14 +2229,10 @@ impl Reporter {
         println!();
     }
 
-    fn print_hybrid_strategy(&self, strategy: &HybridStrategy) {
+    fn print_auto_optimized_strategy(&self, strategy: &AutoOptimizedStrategy) {
         println!(
-            "{}============ Hybrid Optimizer Strategy ============={}",
+            "{}============= Auto Optimizer Strategy =============={}",
             self.colors.cyan, self.colors.reset
-        );
-        println!(
-            "  {}Free System RAM   :{} {:.0} MB (Usable: {:.0} MB)",
-            self.colors.magenta, self.colors.reset, strategy.free_ram_mb, strategy.usable_ram_mb
         );
         println!(
             "  {}Optimal DP Size   :{} {} matches (DFS will split {})",
@@ -2248,12 +2242,39 @@ impl Reporter {
             strategy.remaining - strategy.optimal_dp_size
         );
         println!(
-            "  {}Est. Compute Time :{} {:.1} seconds",
-            self.colors.magenta, self.colors.reset, strategy.est_compute_time
+            "  {}Free System RAM   :{} {:.0} MB (Usable: {:.0} MB)",
+            self.colors.magenta, self.colors.reset, strategy.free_ram_mb, strategy.usable_ram_mb
         );
         println!(
             "  {}Est. Peak RAM     :{} {:.0} MB",
             self.colors.magenta, self.colors.reset, strategy.est_peak_ram_mb
+        );
+        println!(
+            "  {}Est. Compute Time :{} {:.1} seconds",
+            self.colors.magenta, self.colors.reset, strategy.est_compute_time
+        );
+        println!();
+    }
+
+    fn print_dp_estimate(&self, d: usize, base: u64) {
+        let free_ram_mb = get_free_system_ram_mb();
+        let usable_ram_mb = get_usable_ram_mb(free_ram_mb);
+        let (est_ram_mb, est_time_s) = estimate_dp_cost(d, base);
+        println!(
+            "{}============= DP Simulation Estimates =============={}",
+            self.colors.cyan, self.colors.reset
+        );
+        println!(
+            "  {}Free System RAM   :{} {:.0} MB (Usable: {:.0} MB)",
+            self.colors.magenta, self.colors.reset, free_ram_mb, usable_ram_mb
+        );
+        println!(
+            "  {}Est. Peak RAM     :{} {:.0} MB",
+            self.colors.magenta, self.colors.reset, est_ram_mb
+        );
+        println!(
+            "  {}Est. Compute Time :{} {:.1} seconds",
+            self.colors.magenta, self.colors.reset, est_time_s
         );
         println!();
     }
@@ -2448,14 +2469,11 @@ impl SimulationRunner {
         }
 
         let all_counts = match self {
-            SimulationRunner::Dfs(d) => d.run(
-                &parsed.initial_state,
-                num_threads,
-                interactive,
-                reporter.colors(),
-            ),
-            SimulationRunner::Dp(d) => d.run(&parsed.initial_state, interactive, reporter.colors()),
-            SimulationRunner::Auto(h) => h.run(&parsed.initial_state, interactive, reporter),
+            SimulationRunner::Dfs(d) => {
+                d.run(&parsed.initial_state, reporter, interactive, num_threads)
+            }
+            SimulationRunner::Dp(d) => d.run(&parsed.initial_state, reporter, interactive),
+            SimulationRunner::Auto(h) => h.run(&parsed.initial_state, reporter, interactive),
         };
 
         reporter.print_probability_results(
@@ -2499,6 +2517,15 @@ fn get_free_system_ram_mb() -> f64 {
         }
     }
     2000.0 // Default to 2 GB if not on Linux or undetected
+}
+
+fn get_usable_ram_mb(free_ram_mb: f64) -> f64 {
+    // SAFE RAM CHECK: If > 1.5GB, leave 1GB for the OS. If very tight, use exactly 50%.
+    if free_ram_mb > 1500.0 {
+        (free_ram_mb - 1000.0).max(free_ram_mb * 0.5)
+    } else {
+        free_ram_mb * 0.5
+    }
 }
 
 fn fmt_mem(bytes: u64) -> String {
