@@ -4,11 +4,12 @@ use std::fmt;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::ops::AddAssign;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use sysinfo::{Pid, ProcessesToUpdate, System};
 use terminal_size::{Width, terminal_size};
 
 // ================================================================
@@ -2492,31 +2493,19 @@ impl SimulationRunner {
 // MEMORY AND FORMATTING HELPERS
 // ================================================================
 
-/// Returns current RSS (resident set size) in bytes by reading
-/// /proc/self/status on Linux. Returns None on unsupported platforms.
 fn current_rss_bytes() -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/self/status").ok()?;
-    for line in text.lines() {
-        if line.starts_with("VmRSS:") {
-            let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-            return Some(kb * 1024);
-        }
-    }
-    None
+    static SYS: OnceLock<Mutex<System>> = OnceLock::new();
+    let system = SYS.get_or_init(|| Mutex::new(System::new()));
+    let mut system = system.lock().ok()?;
+    let pid = Pid::from_u32(std::process::id());
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    system.process(pid).map(|p| p.memory())
 }
 
 fn get_free_system_ram_mb() -> f64 {
-    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
-        for line in text.lines() {
-            if line.starts_with("MemAvailable:")
-                && let Some(kb_str) = line.split_whitespace().nth(1)
-                && let Ok(kb) = kb_str.parse::<f64>()
-            {
-                return kb / 1024.0;
-            }
-        }
-    }
-    2000.0 // Default to 2 GB if not on Linux or undetected
+    let mut system = System::new();
+    system.refresh_memory();
+    system.available_memory() as f64 / 1_048_576.0
 }
 
 fn get_usable_ram_mb(free_ram_mb: f64) -> f64 {
