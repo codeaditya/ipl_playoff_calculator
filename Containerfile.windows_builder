@@ -1,0 +1,17 @@
+FROM quay.io/almalinuxorg/almalinux:latest
+
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:${PATH}
+
+RUN dnf -y update && \
+    dnf -y install epel-release && \
+    dnf config-manager --set-enabled crb && \
+    dnf -y install rsync gcc mingw64-gcc && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+      sh -s -- -y \
+        --default-toolchain stable \
+        --target x86_64-pc-windows-gnu \
+        --no-modify-path
+
+WORKDIR /work
