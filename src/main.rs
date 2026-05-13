@@ -444,9 +444,9 @@ impl TableLayout {
                 .max()
                 .unwrap_or(6)
                 .max(6),
-            pos_w: 8,
+            pos_w: 4,
             stat_w: 4,
-            pct_w: 20,
+            pct_w: 19,
         }
     }
 }
