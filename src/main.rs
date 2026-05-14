@@ -54,6 +54,25 @@ impl Colors {
 }
 
 // ================================================================
+// TERMINAL CONTEXT
+// ================================================================
+
+#[derive(Clone, Copy)]
+struct Terminal {
+    colors: Colors,
+    interactive: bool,
+}
+
+impl Terminal {
+    fn new(interactive: bool) -> Self {
+        Self {
+            colors: Colors::new(interactive),
+            interactive,
+        }
+    }
+}
+
+// ================================================================
 // CONSTANTS
 // ================================================================
 
@@ -154,14 +173,11 @@ struct CliArgs {
     calibrate_dp: bool,
 }
 
-fn parse_args() -> Result<CliArgs, AppError> {
+fn parse_args(term: &Terminal) -> Result<CliArgs, AppError> {
     let mut args = env::args();
     let program_name = args
         .next()
         .unwrap_or_else(|| "ipl-playoff-calculator".to_string());
-
-    let interactive = io::stdout().is_terminal();
-    let colors = Colors::new(interactive);
 
     let mut file_path: Option<String> = None;
     let mut algorithm = Algorithm::Auto;
@@ -171,7 +187,7 @@ fn parse_args() -> Result<CliArgs, AppError> {
     for arg in args {
         match arg.as_str() {
             "--help" | "-h" => {
-                print_usage(&program_name, &colors);
+                print_usage(&program_name, term);
                 std::process::exit(0);
             }
             "--allow-no-results" => {
@@ -213,92 +229,92 @@ fn parse_args() -> Result<CliArgs, AppError> {
     })
 }
 
-fn print_usage(program_name: &str, c: &Colors) {
+fn print_usage(program_name: &str, term: &Terminal) {
     eprintln!(
         "{bold}{cyan}IPL Playoff Calculator{reset}\n",
-        bold = c.bold,
-        cyan = c.cyan,
-        reset = c.reset
+        bold = term.colors.bold,
+        cyan = term.colors.cyan,
+        reset = term.colors.reset
     );
     eprintln!(
         "{bold}{yellow}Usage:{reset} {magenta}{prog}{reset} {cyan}[--allow-no-results]{reset} {cyan}[--algo=auto|dfs|dp]{reset} {green}<matches-file>{reset}",
-        bold = c.bold,
-        yellow = c.yellow,
-        reset = c.reset,
-        magenta = c.magenta,
+        bold = term.colors.bold,
+        yellow = term.colors.yellow,
+        reset = term.colors.reset,
+        magenta = term.colors.magenta,
         prog = program_name,
-        cyan = c.cyan,
-        green = c.green,
+        cyan = term.colors.cyan,
+        green = term.colors.green,
     );
     eprintln!(
         "\n{bold}{yellow}Arguments:{reset}",
-        bold = c.bold,
-        yellow = c.yellow,
-        reset = c.reset
+        bold = term.colors.bold,
+        yellow = term.colors.yellow,
+        reset = term.colors.reset
     );
     eprintln!(
         "  {green}<matches-file>{reset}       Path to the text file containing the schedule.",
-        green = c.green,
-        reset = c.reset
+        green = term.colors.green,
+        reset = term.colors.reset
     );
     eprintln!(
         "  {cyan}--allow-no-results{reset}   (Optional) Include ties/washouts (1 pt each) in future outcomes.",
-        cyan = c.cyan,
-        reset = c.reset
+        cyan = term.colors.cyan,
+        reset = term.colors.reset
     );
     eprintln!(
         "  {cyan}--algo=dfs{reset}           DFS simulation: low RAM (~<5 MB), slower for large match counts.",
-        cyan = c.cyan,
-        reset = c.reset
+        cyan = term.colors.cyan,
+        reset = term.colors.reset
     );
     eprintln!(
         "  {cyan}--algo=dp{reset}            DP simulation: faster for large match counts, but uses significantly more RAM.",
-        cyan = c.cyan,
-        reset = c.reset
+        cyan = term.colors.cyan,
+        reset = term.colors.reset
     );
     eprintln!(
         "  {cyan}--algo=auto{reset}          (Default) Dynamically scales between pure DP and Hybrid DFS-DP based on available system RAM.",
-        cyan = c.cyan,
-        reset = c.reset
+        cyan = term.colors.cyan,
+        reset = term.colors.reset
     );
     eprintln!(
         "\n{bold}{yellow}Dev Only Arguments:{reset}",
-        bold = c.bold,
-        yellow = c.yellow,
-        reset = c.reset
+        bold = term.colors.bold,
+        yellow = term.colors.yellow,
+        reset = term.colors.reset
     );
     eprintln!(
         "  {cyan}--calibrate-dp{reset}       Use to calibrate the RAM usage and compute time for DP simulation",
-        cyan = c.cyan,
-        reset = c.reset
+        cyan = term.colors.cyan,
+        reset = term.colors.reset
     );
     eprintln!(
         "\n{bold}{yellow}Matches File Format:{reset}",
-        bold = c.bold,
-        yellow = c.yellow,
-        reset = c.reset
+        bold = term.colors.bold,
+        yellow = term.colors.yellow,
+        reset = term.colors.reset
     );
     eprintln!("  - One match per line. Lines starting with '#' are ignored.");
     eprintln!(
         "  - {magenta}Upcoming:{reset}  Team A vs Team B",
-        magenta = c.magenta,
-        reset = c.reset,
+        magenta = term.colors.magenta,
+        reset = term.colors.reset,
     );
     eprintln!(
         "  - {magenta}Completed:{reset} Team A vs Team B : Winner",
-        magenta = c.magenta,
-        reset = c.reset,
+        magenta = term.colors.magenta,
+        reset = term.colors.reset,
     );
     eprintln!(
         "  - {magenta}No Result:{reset} Team A vs Team B : NR",
-        magenta = c.magenta,
-        reset = c.reset,
+        magenta = term.colors.magenta,
+        reset = term.colors.reset,
     );
     eprintln!(
         "\n{bold}{yellow}Example:{reset}",
-        bold = c.bold,
-        yellow = c.yellow,
-        reset = c.reset
+        bold = term.colors.bold,
+        yellow = term.colors.yellow,
+        reset = term.colors.reset
     );
     eprintln!("  CSK vs RCB : CSK");
     eprintln!("  MI vs DC\n");
@@ -352,12 +368,12 @@ impl StandingState {
     }
 
     #[inline]
-    pub fn points(&self, team: usize) -> u8 {
+    fn points(&self, team: usize) -> u8 {
         (((self.score >> (team * TEAM_BITS)) & TEAM_MASK) >> 4) as u8
     }
 
     #[inline]
-    pub fn wins(&self, team: usize) -> u8 {
+    fn wins(&self, team: usize) -> u8 {
         ((self.score >> (team * TEAM_BITS)) & 0xF) as u8
     }
 }
@@ -418,7 +434,6 @@ struct ParsedInput {
     completed_matches: usize,
 }
 
-#[derive(Clone, Debug)]
 struct Row {
     team: String,
     top2_pts: u64,
@@ -770,7 +785,7 @@ struct DfsSimulator {
     matches: Arc<Vec<(usize, usize)>>,
     ranker: Ranker,
     allow_no_results: bool,
-    pub base: u64,
+    base: u64,
 }
 
 impl DfsSimulator {
@@ -781,6 +796,10 @@ impl DfsSimulator {
             allow_no_results,
             base: if allow_no_results { 3 } else { 2 },
         }
+    }
+
+    fn base(&self) -> u64 {
+        self.base
     }
 
     fn remaining_match_count(&self) -> usize {
@@ -909,11 +928,9 @@ impl DfsSimulator {
     fn run(
         &self,
         initial_state: &StandingState,
-        reporter: &Reporter,
-        interactive: bool,
-        num_threads: usize,
+        _reporter: &Reporter,
+        term: &Terminal,
     ) -> AllCounts {
-        let colors = reporter.colors();
         if self.remaining_match_count() == 0 {
             let mut counts = Counts::default();
             self.ranker.classify(initial_state, &mut counts);
@@ -921,12 +938,13 @@ impl DfsSimulator {
             all.overall += &counts;
             return all;
         }
+        let num_threads = determine_num_threads();
         let split_depth = self.choose_split_depth(num_threads);
         let tasks = self.build_tasks(split_depth, *initial_state);
         let scenarios_per_task = self.scenarios_per_task(split_depth);
         let progress = ProgressTracker::new(self.total_scenarios(), scenarios_per_task);
         let parallel = ParallelDfsSimulator::new(self.clone(), num_threads);
-        parallel.run(tasks, &progress, interactive, colors)
+        parallel.run(tasks, &progress, term)
     }
 }
 
@@ -947,18 +965,12 @@ impl ParallelDfsSimulator {
         }
     }
 
-    fn run(
-        &self,
-        tasks: Vec<Task>,
-        progress: &ProgressTracker,
-        interactive: bool,
-        colors: &Colors,
-    ) -> AllCounts {
+    fn run(&self, tasks: Vec<Task>, progress: &ProgressTracker, term: &Terminal) -> AllCounts {
         let tasks = Arc::new(tasks);
         let next_task = Arc::new(AtomicUsize::new(0));
         let start_time = Instant::now();
         let handles = self.spawn_workers(tasks, next_task, progress);
-        progress.run_ui_loop(interactive, colors, start_time);
+        progress.run_ui_loop(term, start_time);
         self.collect_counts(handles)
     }
 
@@ -1038,8 +1050,8 @@ impl ProgressTracker {
         self.scenarios_per_task
     }
 
-    fn run_ui_loop(&self, interactive: bool, colors: &Colors, start_time: Instant) {
-        if !interactive {
+    fn run_ui_loop(&self, term: &Terminal, start_time: Instant) {
+        if !term.interactive {
             return;
         }
         let mut last_drawn = u64::MAX;
@@ -1054,7 +1066,7 @@ impl ProgressTracker {
                         done,
                         total: self.total_scenarios,
                     },
-                    colors,
+                    term,
                     start_time,
                 );
                 last_drawn = done;
@@ -1072,7 +1084,7 @@ impl ProgressTracker {
 // PROGRESS BAR (shared helper)
 // ================================================================
 
-pub enum ProgressPhase {
+enum ProgressPhase {
     Dfs {
         done: u64,
         total: u64,
@@ -1308,7 +1320,8 @@ fn phase_info(phase: &ProgressPhase, colors: &Colors) -> (f64, PhaseInfo) {
     }
 }
 
-fn draw_progress(phase: ProgressPhase, colors: &Colors, start_time: Instant) {
+fn draw_progress(phase: ProgressPhase, term: &Terminal, start_time: Instant) {
+    let colors = &term.colors;
     let term_width = terminal_width();
 
     let mem_str = current_rss_bytes()
@@ -1397,7 +1410,7 @@ struct DpSimulator {
     matches: Vec<(usize, usize)>,
     ranker: Ranker,
     allow_no_results: bool,
-    pub base: u64,
+    base: u64,
 }
 
 impl DpSimulator {
@@ -1408,6 +1421,10 @@ impl DpSimulator {
             allow_no_results,
             base: if allow_no_results { 3 } else { 2 },
         }
+    }
+
+    fn base(&self) -> u64 {
+        self.base
     }
 
     fn remaining_match_count(&self) -> usize {
@@ -1523,34 +1540,26 @@ impl DpSimulator {
         (next_states, next_len)
     }
 
-    fn build_states(
+    fn simulate_forward(
         &self,
         branch_initial_state: StandingState,
         matches: &[(usize, usize)],
-        interactive: bool,
-        colors: &Colors,
+        term: &Terminal,
         global_start_time: Instant,
-        is_hybrid: bool,
+        match_offset: usize,
     ) -> (Vec<Vec<(u128, u64)>>, usize) {
-        // In pure DP mode (is_hybrid = false), add 1 to account for Match 0
-        // which was pre-processed by the caller.
-        // In hybrid mode (is_hybrid = true), no match is pre-processed.
-        let total_matches = if is_hybrid {
-            matches.len()
-        } else {
-            matches.len() + 1
-        };
+        let total_matches = matches.len() + match_offset;
         let mut total_states = 1;
         let mut states: Vec<Vec<(u128, u64)>> = vec![vec![(branch_initial_state.score, 1)]];
 
-        if interactive {
+        if term.interactive {
             draw_progress(
                 ProgressPhase::DpSimulating {
-                    match_idx: if is_hybrid { 0 } else { 1 },
+                    match_idx: match_offset,
                     total_matches,
                     state_count: total_states,
                 },
-                colors,
+                term,
                 global_start_time,
             );
         }
@@ -1560,14 +1569,14 @@ impl DpSimulator {
             states = next_states;
             total_states = next_len;
 
-            if interactive {
+            if term.interactive {
                 draw_progress(
                     ProgressPhase::DpSimulating {
-                        match_idx: if is_hybrid { idx + 1 } else { idx + 2 },
+                        match_idx: match_offset + idx + 1,
                         total_matches,
                         state_count: total_states,
                     },
-                    colors,
+                    term,
                     global_start_time,
                 );
             }
@@ -1580,8 +1589,7 @@ impl DpSimulator {
         &self,
         states: Vec<Vec<(u128, u64)>>,
         total_states: usize,
-        interactive: bool,
-        colors: &Colors,
+        term: &Terminal,
         global_start_time: Instant,
     ) -> Counts {
         let num_threads = determine_num_threads();
@@ -1634,7 +1642,7 @@ impl DpSimulator {
         }
 
         // Main thread manages the UI loop
-        if interactive {
+        if term.interactive {
             let mut last_drawn = usize::MAX;
             loop {
                 let done = states_done.load(Ordering::Relaxed).min(total_states);
@@ -1644,7 +1652,7 @@ impl DpSimulator {
                             states_done: done,
                             total_states,
                         },
-                        colors,
+                        term,
                         global_start_time,
                     );
                     last_drawn = done;
@@ -1666,36 +1674,31 @@ impl DpSimulator {
         final_counts
     }
 
-    fn simulate_and_classify_branch(
+    fn run_branch(
         &self,
         branch_initial_state: StandingState,
         matches: &[(usize, usize)],
         branch_name: &str,
-        interactive: bool,
-        colors: &Colors,
+        term: &Terminal,
         global_start_time: Instant,
     ) -> Counts {
-        println!("{}{}{} ==========", colors.cyan, branch_name, colors.reset);
-        let (states, total_states) = self.build_states(
-            branch_initial_state,
-            matches,
-            interactive,
-            colors,
-            global_start_time,
-            false,
+        println!(
+            "{}{}{} ==========",
+            term.colors.cyan, branch_name, term.colors.reset
         );
+        let (states, total_states) =
+            self.simulate_forward(branch_initial_state, matches, term, global_start_time, 1);
         // Print a newline so the Simulating Progress bar is saved and Classifying gets a fresh line
         println!();
-        self.classify_states_parallel(states, total_states, interactive, colors, global_start_time)
+        self.classify_states_parallel(states, total_states, term, global_start_time)
     }
 
     fn run(
         &self,
         initial_state: &StandingState,
         reporter: &Reporter,
-        interactive: bool,
+        term: &Terminal,
     ) -> AllCounts {
-        let colors = reporter.colors();
         if self.matches.is_empty() {
             let mut leaf = Counts::default();
             self.ranker.classify(initial_state, &mut leaf);
@@ -1713,12 +1716,11 @@ impl DpSimulator {
         // Run Branch A
         let mut state_a = *initial_state;
         state_a.record_win(a0);
-        let counts_a = self.simulate_and_classify_branch(
+        let counts_a = self.run_branch(
             state_a,
             remaining_matches,
             "==== Branch: Team A Wins ",
-            interactive,
-            colors,
+            term,
             global_start_time,
         );
         all.if_a_wins += &counts_a;
@@ -1727,12 +1729,11 @@ impl DpSimulator {
         // Run Branch B
         let mut state_b = *initial_state;
         state_b.record_win(b0);
-        let counts_b = self.simulate_and_classify_branch(
+        let counts_b = self.run_branch(
             state_b,
             remaining_matches,
             "==== Branch: Team B Wins ",
-            interactive,
-            colors,
+            term,
             global_start_time,
         );
         all.if_b_wins += &counts_b;
@@ -1742,12 +1743,11 @@ impl DpSimulator {
         if self.allow_no_results {
             let mut state_nr = *initial_state;
             state_nr.record_no_result(a0, b0);
-            let counts_nr = self.simulate_and_classify_branch(
+            let counts_nr = self.run_branch(
                 state_nr,
                 remaining_matches,
                 "==== Branch: No Result ",
-                interactive,
-                colors,
+                term,
                 global_start_time,
             );
             all.if_nr += &counts_nr;
@@ -1757,7 +1757,7 @@ impl DpSimulator {
         all
     }
 
-    pub fn run_calibration(&self, initial_state: StandingState, colors: &Colors) {
+    fn run_calibration(&self, initial_state: StandingState, term: &Terminal) {
         let total = self.matches.len();
         println!(
             "╔══════════════ DP Calibration ({} total matches, base={}) ═══════════════╗",
@@ -1795,19 +1795,11 @@ impl DpSimulator {
 
             let start = Instant::now();
 
-            // build_states: the main RAM consumer.
-            let (states, total_states) = self.build_states(
-                initial_state,
-                dp_matches,
-                false,
-                colors,
-                Instant::now(),
-                true, // is_hybrid=true: no extra match peel
-            );
+            let (states, total_states) =
+                self.simulate_forward(initial_state, dp_matches, term, Instant::now(), 0);
 
             // classify_states_parallel: ~30-50% of total time, must be included.
-            let _counts =
-                self.classify_states_parallel(states, total_states, false, colors, Instant::now());
+            let _counts = self.classify_states_parallel(states, total_states, term, Instant::now());
 
             let elapsed = start.elapsed().as_secs_f64();
 
@@ -1822,7 +1814,7 @@ impl DpSimulator {
             let total_time = elapsed * self.base as f64;
 
             // Auto Strategy parameters if we had exactly `d` matches remaining
-            let auto_optimized_strategy = get_auto_optimized_strategy(d + 1, self.base);
+            let auto_optimized_strategy = AutoOptimizedStrategy::for_remaining(d + 1, self.base);
 
             println!(
                 " {:>2} │ {:>12} {:>10} {:>8.2}s │ {:>7} {:>10} {:>8.2}s",
@@ -1843,15 +1835,6 @@ impl DpSimulator {
 // ================================================================
 // AUTO STRATEGY OPTIMIZER & AUTO SIMULATOR
 // ================================================================
-
-struct AutoOptimizedStrategy {
-    remaining: usize,
-    optimal_dp_size: usize,
-    free_ram_mb: f64,
-    usable_ram_mb: f64,
-    est_peak_ram_mb: f64,
-    est_compute_time: f64,
-}
 
 /// d = Remaining matches that would purely run on DP Simulation excluding the seed match
 fn estimate_dp_cost(d: usize, base: u64) -> (f64, f64) {
@@ -1889,60 +1872,75 @@ fn estimate_dp_cost(d: usize, base: u64) -> (f64, f64) {
     }
 }
 
-fn get_auto_optimized_strategy(remaining: usize, base: u64) -> AutoOptimizedStrategy {
-    let free_ram_mb = get_free_system_ram_mb();
-    let usable_ram_mb = get_usable_ram_mb(free_ram_mb);
+struct AutoOptimizedStrategy {
+    remaining: usize,
+    optimal_dp_size: usize,
+    free_ram_mb: f64,
+    usable_ram_mb: f64,
+    est_peak_ram_mb: f64,
+    est_compute_time: f64,
+}
 
-    let mut optimal_dp_size = 1;
-    let mut est_peak_ram_mb = 0.0;
-    let mut est_compute_time = 0.0;
+impl AutoOptimizedStrategy {
+    fn for_remaining(remaining: usize, base: u64) -> AutoOptimizedStrategy {
+        let free_ram_mb = get_free_system_ram_mb();
+        let usable_ram_mb = get_usable_ram_mb(free_ram_mb);
 
-    // OPTIMAL STRATEGY: Greedy Max-DP
-    for d in (1..=remaining).rev() {
-        let (ram_req_mb, time_req) = if d == remaining {
-            estimate_dp_cost(d - 1, base)
-        } else {
-            estimate_dp_cost(d, base)
-        };
-        if ram_req_mb <= usable_ram_mb {
-            let dfs_branches = (base as f64).powi((remaining - d) as i32);
-            optimal_dp_size = d;
-            est_peak_ram_mb = ram_req_mb;
-            est_compute_time = if optimal_dp_size == remaining {
-                time_req
+        let mut optimal_dp_size = 1;
+        let mut est_peak_ram_mb = 0.0;
+        let mut est_compute_time = 0.0;
+
+        // OPTIMAL STRATEGY: Greedy Max-DP
+        for d in (1..=remaining).rev() {
+            let (ram_req_mb, time_req) = if d == remaining {
+                estimate_dp_cost(d - 1, base)
             } else {
-                dfs_branches * time_req / base as f64
+                estimate_dp_cost(d, base)
             };
-            break;
+            if ram_req_mb <= usable_ram_mb {
+                let dfs_branches = (base as f64).powi((remaining - d) as i32);
+                optimal_dp_size = d;
+                est_peak_ram_mb = ram_req_mb;
+                est_compute_time = if optimal_dp_size == remaining {
+                    time_req
+                } else {
+                    dfs_branches * time_req / base as f64
+                };
+                break;
+            }
         }
-    }
 
-    AutoOptimizedStrategy {
-        remaining,
-        optimal_dp_size,
-        free_ram_mb,
-        usable_ram_mb,
-        est_peak_ram_mb,
-        est_compute_time,
+        AutoOptimizedStrategy {
+            remaining,
+            optimal_dp_size,
+            free_ram_mb,
+            usable_ram_mb,
+            est_peak_ram_mb,
+            est_compute_time,
+        }
     }
 }
 
 #[derive(Clone)]
 struct AutoSimulator {
     matches: Vec<(usize, usize)>,
-    allow_no_results: bool,
     base: u64,
     dp_simulator: DpSimulator,
+    dfs_simulator: DfsSimulator,
 }
 
 impl AutoSimulator {
     fn new(parsed: &ParsedInput, allow_no_results: bool) -> Self {
         Self {
             matches: parsed.matches.clone(),
-            allow_no_results,
             base: if allow_no_results { 3 } else { 2 },
             dp_simulator: DpSimulator::new(parsed, allow_no_results),
+            dfs_simulator: DfsSimulator::new(parsed, allow_no_results),
         }
+    }
+
+    fn base(&self) -> u64 {
+        self.base
     }
 
     fn remaining_match_count(&self) -> usize {
@@ -1953,82 +1951,33 @@ impl AutoSimulator {
         pow_u64(self.base, self.remaining_match_count())
     }
 
-    fn build_dfs_tasks(
-        &self,
-        match_idx: usize,
-        split_depth: usize,
-        state: StandingState,
-        slot: u8,
-        tasks: &mut Vec<Task>,
-    ) {
-        if match_idx == split_depth {
-            tasks.push(Task {
-                next_match: match_idx,
-                state,
-                slot,
-            });
-            return;
-        }
-        let (a, b) = self.matches[match_idx];
-        let (slot_a, slot_b, slot_nr) = if slot == SLOT_UNSET {
-            (SLOT_A, SLOT_B, SLOT_NR)
-        } else {
-            (slot, slot, slot)
-        };
-
-        let mut sa = state;
-        sa.record_win(a);
-        self.build_dfs_tasks(match_idx + 1, split_depth, sa, slot_a, tasks);
-
-        let mut sb = state;
-        sb.record_win(b);
-        self.build_dfs_tasks(match_idx + 1, split_depth, sb, slot_b, tasks);
-
-        if self.allow_no_results {
-            let mut snr = state;
-            snr.record_no_result(a, b);
-            self.build_dfs_tasks(match_idx + 1, split_depth, snr, slot_nr, tasks);
-        }
-    }
-
-    fn single_pass_dp(
+    fn run_dp_branch(
         &self,
         start_state: StandingState,
         remaining_matches: &[(usize, usize)],
-        interactive: bool,
-        colors: &Colors,
+        term: &Terminal,
     ) -> Counts {
         let start_time = Instant::now();
-        let (states, total_states) = self.dp_simulator.build_states(
-            start_state,
-            remaining_matches,
-            interactive,
-            colors,
-            start_time,
-            true,
-        );
+        let (states, total_states) =
+            self.dp_simulator
+                .simulate_forward(start_state, remaining_matches, term, start_time, 0);
         println!();
-        self.dp_simulator.classify_states_parallel(
-            states,
-            total_states,
-            interactive,
-            colors,
-            start_time,
-        )
+        self.dp_simulator
+            .classify_states_parallel(states, total_states, term, start_time)
     }
 
     fn run(
         &self,
         initial_state: &StandingState,
         reporter: &Reporter,
-        interactive: bool,
+        term: &Terminal,
     ) -> AllCounts {
         let remaining = self.matches.len();
         if remaining == 0 {
-            return self.dp_simulator.run(initial_state, reporter, interactive);
+            return self.dp_simulator.run(initial_state, reporter, term);
         }
 
-        let strategy = get_auto_optimized_strategy(remaining, self.base);
+        let strategy = AutoOptimizedStrategy::for_remaining(remaining, self.base);
         let split_depth = remaining - strategy.optimal_dp_size;
 
         reporter.print_auto_optimized_strategy(&strategy);
@@ -2039,7 +1988,7 @@ impl AutoSimulator {
                 reporter.colors().green,
                 reporter.colors().reset
             );
-            return self.dp_simulator.run(initial_state, reporter, interactive);
+            return self.dp_simulator.run(initial_state, reporter, term);
         }
 
         println!(
@@ -2055,7 +2004,8 @@ impl AutoSimulator {
 
         let global_start_time = Instant::now();
         let mut tasks = Vec::new();
-        self.build_dfs_tasks(0, split_depth, *initial_state, SLOT_UNSET, &mut tasks);
+        self.dfs_simulator
+            .build_tasks_from(0, split_depth, *initial_state, SLOT_UNSET, &mut tasks);
 
         let mut final_all = AllCounts::default();
 
@@ -2071,8 +2021,7 @@ impl AutoSimulator {
 
             let dp_matches = &self.matches[task.next_match..];
 
-            let result_counts =
-                self.single_pass_dp(task.state, dp_matches, interactive, reporter.colors());
+            let result_counts = self.run_dp_branch(task.state, dp_matches, term);
 
             let after_elapsed = global_start_time.elapsed().as_secs_f64();
             println!(
@@ -2107,13 +2056,33 @@ impl AutoSimulator {
 struct Reporter {
     colors: Colors,
     layout: TableLayout,
+    team_names: Vec<String>,
+    team_count: usize,
+    seat_scale: u64,
+    completed_matches: usize,
+    matches_played: [u8; MAX_TEAMS],
+    losses: [u8; MAX_TEAMS],
+    no_results: [u8; MAX_TEAMS],
+    initial_state: StandingState,
+    next_match: Option<(usize, usize)>,
+    allow_no_results: bool,
 }
 
 impl Reporter {
-    fn new(parsed: &ParsedInput, interactive: bool) -> Self {
+    fn new(parsed: &ParsedInput, term: &Terminal, allow_no_results: bool) -> Self {
         Self {
-            colors: Colors::new(interactive),
+            colors: term.colors,
             layout: TableLayout::from_input(parsed),
+            team_names: parsed.team_names.clone(),
+            team_count: parsed.team_count,
+            seat_scale: parsed.seat_scale,
+            completed_matches: parsed.completed_matches,
+            matches_played: parsed.matches_played,
+            losses: parsed.losses,
+            no_results: parsed.no_results,
+            initial_state: parsed.initial_state,
+            next_match: parsed.matches.first().copied(),
+            allow_no_results,
         }
     }
 
@@ -2131,10 +2100,10 @@ impl Reporter {
         self.layout.pos_w + self.layout.team_w + (4 * self.layout.pct_w) + 5
     }
 
-    fn print_current_standings(&self, parsed: &ParsedInput) {
+    fn print_current_standings(&self) {
         let heading_text = format!(
             "========= Current Standings after Match {} =========",
-            parsed.completed_matches
+            self.completed_matches
         );
         println!(
             "{}{:^width$}{}",
@@ -2159,26 +2128,22 @@ impl Reporter {
             stat_w = self.layout.stat_w,
         );
         let mut initial_scores = [0u16; MAX_TEAMS];
-        for (i, score) in initial_scores
-            .iter_mut()
-            .enumerate()
-            .take(parsed.team_count)
-        {
-            *score = ((parsed.initial_state.score >> (i * TEAM_BITS)) & TEAM_MASK) as u16;
+        for (i, score) in initial_scores.iter_mut().enumerate().take(self.team_count) {
+            *score = ((self.initial_state.score >> (i * TEAM_BITS)) & TEAM_MASK) as u16;
         }
-        let current_order = sort_teams(parsed.team_count, &initial_scores);
-        for (idx, &team_idx) in current_order.iter().take(parsed.team_count).enumerate() {
+        let current_order = sort_teams(self.team_count, &initial_scores);
+        for (idx, &team_idx) in current_order.iter().take(self.team_count).enumerate() {
             println!(
                 "{:>pos_w$} {}{:team_w$}{} {:>stat_w$} {:>stat_w$} {:>stat_w$} {:>stat_w$} {:>stat_w$}",
                 idx + 1,
                 self.colors.green,
-                parsed.team_names[team_idx],
+                self.team_names[team_idx],
                 self.colors.reset,
-                parsed.matches_played[team_idx],
-                parsed.initial_state.wins(team_idx),
-                parsed.losses[team_idx],
-                parsed.no_results[team_idx],
-                parsed.initial_state.points(team_idx),
+                self.matches_played[team_idx],
+                self.initial_state.wins(team_idx),
+                self.losses[team_idx],
+                self.no_results[team_idx],
+                self.initial_state.points(team_idx),
                 pos_w = self.layout.pos_w,
                 team_w = self.layout.team_w,
                 stat_w = self.layout.stat_w,
@@ -2280,10 +2245,10 @@ impl Reporter {
         println!();
     }
 
-    fn print_current_probabilities_heading(&self, parsed: &ParsedInput) {
+    fn print_current_probabilities_heading(&self) {
         let heading_text = format!(
             "========= Current Probabilities after Match {} =========",
-            parsed.completed_matches
+            self.completed_matches
         );
         println!(
             "{}{:^width$}{}",
@@ -2294,13 +2259,13 @@ impl Reporter {
         );
     }
 
-    fn print_next_match_impact_heading(&self, parsed: &ParsedInput) {
-        if let Some(&(a, b)) = parsed.matches.first() {
+    fn print_next_match_impact_heading(&self) {
+        if let Some((a, b)) = self.next_match {
             let heading_text = format!(
                 "========= Impact of Next Match {}: {} vs {} =========",
-                parsed.completed_matches + 1,
-                parsed.team_names[a],
-                parsed.team_names[b]
+                self.completed_matches + 1,
+                self.team_names[a],
+                self.team_names[b]
             );
             println!(
                 "{}{:^width$}{}\n",
@@ -2323,16 +2288,10 @@ impl Reporter {
         );
     }
 
-    fn print_results(
-        &self,
-        parsed: &ParsedInput,
-        counts: &Counts,
-        total_scenarios: u64,
-        seat_scale: u64,
-    ) {
-        let mut rows: Vec<Row> = (0..parsed.team_count)
+    fn print_results(&self, counts: &Counts, total_scenarios: u64) {
+        let mut rows: Vec<Row> = (0..self.team_count)
             .map(|i| Row {
-                team: parsed.team_names[i].clone(),
+                team: self.team_names[i].clone(),
                 top2_pts: counts.top2_pts[i],
                 top2_good_nrr_units: counts.top2_good_nrr_units[i],
                 top4_pts: counts.top4_pts[i],
@@ -2371,9 +2330,9 @@ impl Reporter {
                 row.team,
                 self.colors.reset,
                 fmt_pct(row.top2_pts, total_scenarios),
-                fmt_scaled_pct(row.top2_good_nrr_units, total_scenarios, seat_scale),
+                fmt_scaled_pct(row.top2_good_nrr_units, total_scenarios, self.seat_scale),
                 fmt_pct(row.top4_pts, total_scenarios),
-                fmt_scaled_pct(row.top4_good_nrr_units, total_scenarios, seat_scale),
+                fmt_scaled_pct(row.top4_good_nrr_units, total_scenarios, self.seat_scale),
                 pos_w = self.layout.pos_w,
                 team_w = self.layout.team_w,
                 pct_w = self.layout.pct_w,
@@ -2381,46 +2340,33 @@ impl Reporter {
         }
     }
 
-    fn print_probability_results(
-        &self,
-        parsed: &ParsedInput,
-        all_counts: &AllCounts,
-        total_scenarios: u64,
-        base: u64,
-        allow_no_results: bool,
-    ) {
-        self.print_current_probabilities_heading(parsed);
-        self.print_results(
-            parsed,
-            &all_counts.overall,
-            total_scenarios,
-            parsed.seat_scale,
-        );
+    fn print_probability_results(&self, all_counts: &AllCounts, total_scenarios: u64, base: u64) {
+        self.print_current_probabilities_heading();
+        self.print_results(&all_counts.overall, total_scenarios);
 
-        if !parsed.matches.is_empty() {
-            let (a, b) = parsed.matches[0];
+        if let Some((a, b)) = self.next_match {
             let cond_total = total_scenarios / base;
 
             println!();
-            self.print_next_match_impact_heading(parsed);
+            self.print_next_match_impact_heading();
 
-            let title_a = format!("If {} beats {}", parsed.team_names[a], parsed.team_names[b]);
+            let title_a = format!("If {} beats {}", self.team_names[a], self.team_names[b]);
             self.print_next_match_scenario_heading(&title_a);
-            self.print_results(parsed, &all_counts.if_a_wins, cond_total, parsed.seat_scale);
+            self.print_results(&all_counts.if_a_wins, cond_total);
             println!();
 
-            let title_b = format!("If {} beats {}", parsed.team_names[b], parsed.team_names[a]);
+            let title_b = format!("If {} beats {}", self.team_names[b], self.team_names[a]);
             self.print_next_match_scenario_heading(&title_b);
-            self.print_results(parsed, &all_counts.if_b_wins, cond_total, parsed.seat_scale);
+            self.print_results(&all_counts.if_b_wins, cond_total);
             println!();
 
-            if allow_no_results {
+            if self.allow_no_results {
                 let title_nr = format!(
                     "If {} vs {} ends in NR",
-                    parsed.team_names[a], parsed.team_names[b]
+                    self.team_names[a], self.team_names[b]
                 );
                 self.print_next_match_scenario_heading(&title_nr);
-                self.print_results(parsed, &all_counts.if_nr, cond_total, parsed.seat_scale);
+                self.print_results(&all_counts.if_nr, cond_total);
                 println!();
             }
         }
@@ -2440,28 +2386,29 @@ enum SimulationRunner {
 impl SimulationRunner {
     fn run_simulation(
         &self,
-        algorithm: Algorithm,
-        parsed: &ParsedInput,
-        cli: &CliArgs,
+        initial_state: &StandingState,
         reporter: &Reporter,
-        num_threads: usize,
-        interactive: bool,
+        term: &Terminal,
     ) -> Result<(), AppError> {
         let (remaining, base_val, total_scenarios) = match self {
-            SimulationRunner::Dfs(d) => (d.remaining_match_count(), d.base, d.total_scenarios()),
-            SimulationRunner::Dp(d) => (d.remaining_match_count(), d.base, d.total_scenarios()),
-            SimulationRunner::Auto(h) => (h.remaining_match_count(), h.base, h.total_scenarios()),
+            SimulationRunner::Dfs(d) => (d.remaining_match_count(), d.base(), d.total_scenarios()),
+            SimulationRunner::Dp(d) => (d.remaining_match_count(), d.base(), d.total_scenarios()),
+            SimulationRunner::Auto(h) => (h.remaining_match_count(), h.base(), h.total_scenarios()),
         };
 
-        check_u64_overflow(parsed.seat_scale, remaining, base_val);
-        reporter.print_current_standings(parsed);
+        check_u64_overflow(reporter.seat_scale, remaining, base_val);
+        reporter.print_current_standings();
         reporter.print_simulation_header(
-            algorithm,
-            parsed.completed_matches,
+            match self {
+                SimulationRunner::Dfs(_) => Algorithm::Dfs,
+                SimulationRunner::Dp(_) => Algorithm::Dp,
+                SimulationRunner::Auto(_) => Algorithm::Auto,
+            },
+            reporter.completed_matches,
             remaining,
             base_val,
             total_scenarios,
-            num_threads,
+            determine_num_threads(),
         );
 
         if remaining == 0 {
@@ -2470,20 +2417,12 @@ impl SimulationRunner {
         }
 
         let all_counts = match self {
-            SimulationRunner::Dfs(d) => {
-                d.run(&parsed.initial_state, reporter, interactive, num_threads)
-            }
-            SimulationRunner::Dp(d) => d.run(&parsed.initial_state, reporter, interactive),
-            SimulationRunner::Auto(h) => h.run(&parsed.initial_state, reporter, interactive),
+            SimulationRunner::Dfs(d) => d.run(initial_state, reporter, term),
+            SimulationRunner::Dp(d) => d.run(initial_state, reporter, term),
+            SimulationRunner::Auto(h) => h.run(initial_state, reporter, term),
         };
 
-        reporter.print_probability_results(
-            parsed,
-            &all_counts,
-            total_scenarios,
-            base_val,
-            cli.allow_no_results,
-        );
+        reporter.print_probability_results(&all_counts, total_scenarios, base_val);
 
         Ok(())
     }
@@ -2597,17 +2536,16 @@ fn check_u64_overflow(seat_scale: u64, remaining: usize, base: u64) {
 }
 
 fn run() -> Result<(), AppError> {
-    let cli = parse_args()?;
-    let interactive = io::stdout().is_terminal();
+    let term = Terminal::new(io::stdout().is_terminal());
+    let cli = parse_args(&term)?;
     let matches_input = read_matches_file(&cli.file_path)?;
     let parsed = parse_inputs(&matches_input)?;
-    let reporter = Reporter::new(&parsed, interactive);
-    let num_threads = determine_num_threads();
     if cli.calibrate_dp {
         let dp = DpSimulator::new(&parsed, cli.allow_no_results);
-        dp.run_calibration(parsed.initial_state, reporter.colors());
+        dp.run_calibration(parsed.initial_state, &Terminal::new(false));
         return Ok(());
     }
+    let reporter = Reporter::new(&parsed, &term, cli.allow_no_results);
     let runner = match cli.algorithm {
         Algorithm::Dfs => SimulationRunner::Dfs(DfsSimulator::new(&parsed, cli.allow_no_results)),
         Algorithm::Dp => SimulationRunner::Dp(DpSimulator::new(&parsed, cli.allow_no_results)),
@@ -2615,14 +2553,7 @@ fn run() -> Result<(), AppError> {
             SimulationRunner::Auto(AutoSimulator::new(&parsed, cli.allow_no_results))
         }
     };
-    runner.run_simulation(
-        cli.algorithm,
-        &parsed,
-        &cli,
-        &reporter,
-        num_threads,
-        interactive,
-    )?;
+    runner.run_simulation(&parsed.initial_state, &reporter, &term)?;
     Ok(())
 }
 
