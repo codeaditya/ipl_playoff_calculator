@@ -1,0 +1,155 @@
+name: Continuous Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  actions: write    # needed to delete stale caches
+  contents: write   # needed to force-push 'continuous' tag and edit the release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO_NAME: ${{ github.event.repository.name }}
+      CARGO_VOLUME_NAME: cargo-cache
+      LINUX_BUILDER_IMAGE: rust_linux_builder
+      WINDOWS_BUILDER_IMAGE: rust_windows_builder
+      CARGO_CACHE_KEY_PREFIX: cached-volume:cargo-cache
+      LINUX_BUILDER_IMAGE_CACHE_KEY_PREFIX: cached-image:rust_linux_builder
+      WINDOWS_BUILDER_IMAGE_CACHE_KEY_PREFIX: cached-image:rust_windows_builder
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Make build script executable
+        run: chmod +x ./build.sh
+
+      # == Evict stale caches older than 7 days before restoring ==============
+      - name: Delete stale caches (older than 7 days)
+        run: |
+          SEVEN_DAYS_AGO=$(date -d '7 days ago' --utc +%s)
+
+          for KEY_PREFIX in "${{ env.CARGO_CACHE_KEY_PREFIX }}-" "${{ env.LINUX_BUILDER_IMAGE_CACHE_KEY_PREFIX }}-" "${{ env.WINDOWS_BUILDER_IMAGE_CACHE_KEY_PREFIX }}-"; do
+            echo "Checking caches with prefix: $KEY_PREFIX"
+            gh cache list \
+              --repo "$GITHUB_REPOSITORY" \
+              --key "$KEY_PREFIX" \
+              --limit 100 \
+              --json id,key,createdAt \
+            | jq -r --argjson cutoff "$SEVEN_DAYS_AGO" \
+                '[.[] | select((.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) < $cutoff)] | .[].id' \
+            | while read -r id; do
+                echo "  Deleting stale cache id=$id"
+                gh cache delete "$id" --repo "$GITHUB_REPOSITORY"
+              done
+          done
+
+      # == Cargo cache (named volume backing directory) =======================
+      - name: Restore cargo cache
+        id: cargo-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.local/share/containers/storage/volumes/${{ env.CARGO_VOLUME_NAME }}
+          key: ${{ env.CARGO_CACHE_KEY_PREFIX }}-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
+          restore-keys: |
+            ${{ env.CARGO_CACHE_KEY_PREFIX }}-
+
+      # == Container image cache: Linux builder ===============================
+      - name: Restore Linux builder image from cache
+        id: linux-builder-image-cache
+        uses: actions/cache@v5
+        with:
+          path: /tmp/${{ env.LINUX_BUILDER_IMAGE }}.tar
+          key: ${{ env.LINUX_BUILDER_IMAGE_CACHE_KEY_PREFIX }}-${{ hashFiles('Containerfile.linux_builder') }}
+
+      - name: Load cached Linux builder image into Podman
+        if: steps.linux-builder-image-cache.outputs.cache-hit == 'true'
+        run: podman load --input /tmp/${{ env.LINUX_BUILDER_IMAGE }}.tar
+
+      - name: Setup Linux builder image
+        if: steps.linux-builder-image-cache.outputs.cache-hit != 'true'
+        run: ./build.sh --setup-linux-image
+
+      - name: Save Linux builder image to cache
+        if: steps.linux-builder-image-cache.outputs.cache-hit != 'true'
+        run: podman save --output /tmp/${{ env.LINUX_BUILDER_IMAGE }}.tar ${{ env.LINUX_BUILDER_IMAGE }}
+
+      # == Container image cache: Windows builder =============================
+      - name: Restore Windows builder image from cache
+        id: windows-builder-image-cache
+        uses: actions/cache@v5
+        with:
+          path: /tmp/${{ env.WINDOWS_BUILDER_IMAGE }}.tar
+          key: ${{ env.WINDOWS_BUILDER_IMAGE_CACHE_KEY_PREFIX }}-${{ hashFiles('Containerfile.windows_builder') }}
+
+      - name: Load cached Windows builder image into Podman
+        if: steps.windows-builder-image-cache.outputs.cache-hit == 'true'
+        run: podman load --input /tmp/${{ env.WINDOWS_BUILDER_IMAGE }}.tar
+
+      - name: Setup Windows builder image
+        if: steps.windows-builder-image-cache.outputs.cache-hit != 'true'
+        run: ./build.sh --setup-windows-image
+
+      - name: Save Windows builder image to cache
+        if: steps.windows-builder-image-cache.outputs.cache-hit != 'true'
+        run: podman save --output /tmp/${{ env.WINDOWS_BUILDER_IMAGE }}.tar ${{ env.WINDOWS_BUILDER_IMAGE }}
+
+      # == Build Linux binaries ===============================================
+      - name: Build Linux binaries
+        run: ./build.sh --linux
+
+      # == Build Windows binaries =============================================
+      - name: Build Windows binaries
+        run: ./build.sh --windows
+
+      # == Force-push the 'continuous' tag to current HEAD ====================
+      - name: Move 'continuous' tag to HEAD
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f continuous
+          git push -f origin refs/tags/continuous
+
+      # == Create or update the rolling 'continuous' release ==================
+      - name: Update rolling 'continuous' release
+        env:
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          TAG="continuous"
+          TITLE="Continuous Release"
+
+          LINUX_BINARY_CHECKSUM=$(sha256sum "dist/${REPO_NAME}" | cut -d' ' -f1)
+          WINDOWS_BINARY_CHECKSUM=$(sha256sum "dist/${REPO_NAME}.exe" | cut -d' ' -f1)
+
+          NOTES="Continuous release - built from commit ${SHORT_SHA::7} on $(date -u '+%Y-%m-%d %H:%M UTC')
+
+          **Binaries:**
+
+          | Platform | File | SHA256 Checksum |
+          |----------|------|-----------------|
+          | Linux x86_64 | \`${REPO_NAME}\` | \`$LINUX_BINARY_CHECKSUM\` |
+          | Windows x86_64 | \`${REPO_NAME}.exe\` | \`$WINDOWS_BINARY_CHECKSUM\` |"
+
+          # Delete existing release (ignore errors if it doesn't exist yet)
+          gh release delete "$TAG" -y --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+
+          # Create fresh release
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" \
+            --notes "$NOTES"
+
+          # Upload artifacts
+          gh release upload "$TAG" \
+            "dist/${REPO_NAME}" \
+            "dist/${REPO_NAME}.exe" \
+            --repo "$GITHUB_REPOSITORY"

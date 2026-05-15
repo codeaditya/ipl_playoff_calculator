@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Configuration
+CARGO_VOLUME_NAME="cargo-cache"
+LINUX_BUILDER_IMAGE="rust_linux_builder"
+WINDOWS_BUILDER_IMAGE="rust_windows_builder"
+
 # Text colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -33,11 +38,11 @@ show_help() {
 }
 
 setup_volume() {
-  if podman volume inspect cargo-cache >/dev/null 2>&1; then
-    log "$BLUE" "--> Volume 'cargo-cache' already exists. Skipping."
+  if podman volume inspect "$CARGO_VOLUME_NAME" >/dev/null 2>&1; then
+    log "$BLUE" "--> Volume '$CARGO_VOLUME_NAME' already exists. Skipping."
   else
-    log "$YELLOW" "--> Creating cargo-cache volume..."
-    podman volume create cargo-cache
+    log "$YELLOW" "--> Creating $CARGO_VOLUME_NAME volume..."
+    podman volume create "$CARGO_VOLUME_NAME"
   fi
 }
 
@@ -74,10 +79,10 @@ update_container_image() {
 build_linux_application_binary() {
   log "$YELLOW" "--> Starting Linux Application Build..."
   podman run --rm \
-    -v cargo-cache:/cache/cargo \
+    -v "$CARGO_VOLUME_NAME":/cache/cargo \
     -v "$PWD":/work:Z \
     -w /work \
-    rust_linux_builder \
+    "$LINUX_BUILDER_IMAGE" \
     bash -lc "
       set -euo pipefail
       export CARGO_HOME=/cache/cargo/home
@@ -94,10 +99,10 @@ build_linux_application_binary() {
 build_windows_application_binary() {
   log "$YELLOW" "--> Starting Windows Application Build..."
   podman run --rm \
-    -v cargo-cache:/cache/cargo \
+    -v "$CARGO_VOLUME_NAME":/cache/cargo \
     -v "$PWD":/work:Z \
     -w /work \
-    rust_windows_builder \
+    "$WINDOWS_BUILDER_IMAGE" \
     bash -lc "
       set -euo pipefail
       export CARGO_HOME=/cache/cargo/home
@@ -120,24 +125,24 @@ fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
   --setup)
-    build_container_image rust_linux_builder Containerfile.linux_builder
-    build_container_image rust_windows_builder Containerfile.windows_builder
+    build_container_image "$LINUX_BUILDER_IMAGE" Containerfile.linux_builder
+    build_container_image "$WINDOWS_BUILDER_IMAGE" Containerfile.windows_builder
     shift
     ;;
   --setup-linux-image)
-    build_container_image rust_linux_builder Containerfile.linux_builder
+    build_container_image "$LINUX_BUILDER_IMAGE" Containerfile.linux_builder
     shift
     ;;
   --setup-windows-image)
-    build_container_image rust_windows_builder Containerfile.windows_builder
+    build_container_image "$WINDOWS_BUILDER_IMAGE" Containerfile.windows_builder
     shift
     ;;
   --update-linux-image)
-    update_container_image rust_linux_builder
+    update_container_image "$LINUX_BUILDER_IMAGE"
     shift
     ;;
   --update-windows-image)
-    update_container_image rust_windows_builder
+    update_container_image "$WINDOWS_BUILDER_IMAGE"
     shift
     ;;
   --linux)
