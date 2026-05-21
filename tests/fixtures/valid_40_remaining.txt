@@ -1,0 +1,82 @@
+####################################################
+## Format:
+## Completed (Winner): Team A vs Team B : Team A
+## Completed (Tie/NR): Team A vs Team B : NR
+## Upcoming Match: Team A vs Team B
+####################################################
+
+# ---IPL 2026---
+
+# --- COMPLETED MATCHES ---
+SRH vs RCB : RCB
+KKR vs MI : MI
+CSK vs RR : RR
+GT vs PBKS : PBKS
+LSG vs DC : DC
+SRH vs KKR : SRH
+CSK vs PBKS : PBKS
+MI vs DC : DC
+RR vs GT : RR
+SRH vs LSG : LSG
+RCB vs CSK : RCB
+KKR vs PBKS : NR
+RR vs MI : RR
+GT vs DC : GT
+KKR vs LSG : LSG
+RCB vs RR : RR
+SRH vs PBKS : PBKS
+CSK vs DC : CSK
+LSG vs GT : GT
+RCB vs MI : RCB
+SRH vs RR : SRH
+CSK vs KKR : CSK
+LSG vs RCB : RCB
+MI vs PBKS : PBKS
+KKR vs GT : GT
+RCB vs DC : DC
+SRH vs CSK : SRH
+RR vs KKR : KKR
+PBKS vs LSG : PBKS
+MI vs GT : MI
+
+# --- UPCOMING MATCHES ---
+SRH vs DC
+RR vs LSG
+CSK vs MI
+GT vs RCB
+DC vs PBKS
+RR vs SRH
+CSK vs GT
+KKR vs LSG
+DC vs RCB
+PBKS vs RR
+MI vs SRH
+RCB vs GT
+RR vs DC
+MI vs CSK
+SRH vs KKR
+PBKS vs GT
+MI vs LSG
+DC vs CSK
+SRH vs PBKS
+LSG vs RCB
+DC vs KKR
+RR vs GT
+CSK vs LSG
+RCB vs MI
+PBKS vs DC
+GT vs SRH
+RCB vs KKR
+PBKS vs MI
+LSG vs CSK
+KKR vs GT
+PBKS vs RCB
+DC vs RR
+CSK vs SRH
+RR vs LSG
+KKR vs MI
+GT vs CSK
+SRH vs RCB
+LSG vs PBKS
+MI vs RR
+KKR vs DC

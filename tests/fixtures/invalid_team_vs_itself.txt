@@ -1,0 +1,2 @@
+# Invalid: team plays against itself
+SRH vs SRH : SRH

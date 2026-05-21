@@ -70,7 +70,7 @@ pub const TEAM_SHIFTS: [u32; MAX_TEAMS] = {
 };
 
 pub const WIN_SCORE_DELTA: u128 = (2 << 4) | 1; // 33 (2 points, 1 win)
-pub const NR_SCORE_DELTA: u128 = (1 << 4) | 0; // 16 (1 point, 0 wins)
+pub const NR_SCORE_DELTA: u128 = 1 << 4; // 16 (1 point, 0 wins)
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct StandingState {
@@ -111,7 +111,7 @@ impl StandingState {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct Counts {
     pub top2_pts: [u64; MAX_TEAMS],
     pub top2_good_nrr_units: [u64; MAX_TEAMS],
@@ -130,7 +130,7 @@ impl AddAssign<&Counts> for Counts {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct AllCounts {
     pub overall: Counts,
     pub if_a_wins: Counts,
@@ -154,7 +154,7 @@ pub struct Task {
     pub slot: u8, // SLOT_A / SLOT_B / SLOT_NR / SLOT_UNSET
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ParsedInput {
     pub team_names: Vec<String>,
     pub team_count: usize,
@@ -165,4 +165,143 @@ pub struct ParsedInput {
     pub no_results: [u8; MAX_TEAMS],
     pub matches: Vec<(usize, usize)>,
     pub completed_matches: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(TEAM_BITS, 10);
+        assert_eq!(TEAM_MASK, 0x3FF);
+        assert_eq!(WIN_SCORE_DELTA, 33);
+        assert_eq!(NR_SCORE_DELTA, 16);
+        assert_eq!(SLOT_UNSET, 0);
+        assert_eq!(SLOT_A, 1);
+        assert_eq!(SLOT_B, 2);
+        assert_eq!(SLOT_NR, 3);
+    }
+
+    #[test]
+    fn test_team_shifts() {
+        for (i, item) in TEAM_SHIFTS.iter().enumerate().take(MAX_TEAMS) {
+            assert_eq!(*item, (i * TEAM_BITS) as u32);
+        }
+    }
+
+    #[test]
+    fn test_standing_state_default() {
+        let state = StandingState::default();
+        assert_eq!(state.score, 0);
+        for i in 0..MAX_TEAMS {
+            assert_eq!(state.points(i), 0);
+            assert_eq!(state.wins(i), 0);
+        }
+    }
+
+    #[test]
+    fn test_record_win_and_undo_win() {
+        let mut state = StandingState::default();
+        state.record_win(0);
+        assert_eq!(state.points(0), 2);
+        assert_eq!(state.wins(0), 1);
+        assert_eq!(state.points(1), 0);
+
+        state.undo_win(0);
+        assert_eq!(state.points(0), 0);
+        assert_eq!(state.wins(0), 0);
+    }
+
+    #[test]
+    fn test_record_win_multiple_teams() {
+        let mut state = StandingState::default();
+        state.record_win(3);
+        state.record_win(7);
+        state.record_win(3);
+
+        assert_eq!(state.points(3), 4);
+        assert_eq!(state.wins(3), 2);
+        assert_eq!(state.points(7), 2);
+        assert_eq!(state.wins(7), 1);
+        assert_eq!(state.points(0), 0);
+    }
+
+    #[test]
+    fn test_record_no_result_and_undo_no_result() {
+        let mut state = StandingState::default();
+        state.record_no_result(2, 5);
+        assert_eq!(state.points(2), 1);
+        assert_eq!(state.wins(2), 0);
+        assert_eq!(state.points(5), 1);
+        assert_eq!(state.wins(5), 0);
+
+        state.undo_no_result(2, 5);
+        assert_eq!(state.points(2), 0);
+        assert_eq!(state.wins(2), 0);
+        assert_eq!(state.points(5), 0);
+        assert_eq!(state.wins(5), 0);
+    }
+
+    #[test]
+    fn test_win_and_nr_round_trip() {
+        let mut state = StandingState::default();
+        state.record_win(1);
+        state.record_no_result(1, 4);
+        state.record_win(4);
+        state.undo_win(1);
+        state.undo_no_result(1, 4);
+        state.undo_win(4);
+        assert_eq!(state.score, 0);
+    }
+
+    #[test]
+    fn test_points_wins_encoding() {
+        let mut state = StandingState::default();
+        state.record_win(0);
+        state.record_win(0);
+        state.record_no_result(0, 1);
+
+        assert_eq!(state.points(0), 5);
+        assert_eq!(state.wins(0), 2);
+        assert_eq!(state.points(1), 1);
+        assert_eq!(state.wins(1), 0);
+    }
+
+    #[test]
+    fn test_algorithm_display() {
+        assert_eq!(Algorithm::Dfs.to_string(), "DFS");
+        assert_eq!(Algorithm::Dp.to_string(), "DP");
+        assert_eq!(Algorithm::Auto.to_string(), "AUTO");
+    }
+
+    #[test]
+    fn test_counts_add_assign() {
+        let mut a = Counts::default();
+        a.top2_pts[0] = 10;
+        a.top4_pts[1] = 20;
+
+        let mut b = Counts::default();
+        b.top2_pts[0] = 5;
+        b.top4_pts[1] = 15;
+
+        a += &b;
+        assert_eq!(a.top2_pts[0], 15);
+        assert_eq!(a.top4_pts[1], 35);
+    }
+
+    #[test]
+    fn test_all_counts_add_assign() {
+        let mut a = AllCounts::default();
+        a.overall.top2_pts[0] = 10;
+        a.if_a_wins.top4_pts[1] = 5;
+
+        let mut b = AllCounts::default();
+        b.overall.top2_pts[0] = 3;
+        b.if_a_wins.top4_pts[1] = 2;
+
+        a += &b;
+        assert_eq!(a.overall.top2_pts[0], 13);
+        assert_eq!(a.if_a_wins.top4_pts[1], 7);
+    }
 }

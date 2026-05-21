@@ -1,0 +1,2 @@
+# Invalid: outcome is neither team name nor NR
+SRH vs RCB : MI

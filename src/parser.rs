@@ -171,3 +171,144 @@ fn apply_completed_outcome(
         ctx.b_name
     )))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_valid_completed_and_upcoming() {
+        let input = "SRH vs RCB : SRH\nRCB vs MI\n";
+        let parsed = parse_inputs(input).unwrap();
+        assert_eq!(parsed.team_count, 3);
+        assert_eq!(parsed.team_names, vec!["SRH", "RCB", "MI"]);
+        assert_eq!(parsed.completed_matches, 1);
+        assert_eq!(parsed.matches.len(), 1);
+        assert_eq!(parsed.initial_state.points(0), 2);
+        assert_eq!(parsed.losses[1], 1);
+    }
+
+    #[test]
+    fn test_parse_nr_outcome() {
+        let input = "SRH vs RCB : NR\n";
+        let parsed = parse_inputs(input).unwrap();
+        assert_eq!(parsed.completed_matches, 1);
+        assert_eq!(parsed.matches.len(), 0);
+        assert_eq!(parsed.initial_state.points(0), 1);
+        assert_eq!(parsed.initial_state.points(1), 1);
+        assert_eq!(parsed.no_results[0], 1);
+        assert_eq!(parsed.no_results[1], 1);
+    }
+
+    #[test]
+    fn test_parse_comments_and_blank_lines_ignored() {
+        let input = "# comment\n\nSRH vs RCB : SRH\n# another comment\n\n";
+        let parsed = parse_inputs(input).unwrap();
+        assert_eq!(parsed.completed_matches, 1);
+        assert_eq!(parsed.matches.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_v_separator() {
+        let input = "SRH v RCB : SRH\n";
+        let parsed = parse_inputs(input).unwrap();
+        assert_eq!(parsed.completed_matches, 1);
+    }
+
+    #[test]
+    fn test_parse_comma_separator() {
+        let input = "SRH, RCB : SRH\n";
+        let parsed = parse_inputs(input).unwrap();
+        assert_eq!(parsed.completed_matches, 1);
+    }
+
+    #[test]
+    fn test_parse_team_vs_itself_error() {
+        let input = "SRH vs SRH : SRH\n";
+        let result = parse_inputs(input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("cannot play against itself"));
+    }
+
+    #[test]
+    fn test_parse_invalid_outcome_error() {
+        let input = "SRH vs RCB : MI\n";
+        let result = parse_inputs(input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid outcome"));
+    }
+
+    #[test]
+    fn test_parse_malformed_line_error() {
+        let input = "SRH RCB\n";
+        let result = parse_inputs(input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid match line"));
+    }
+
+    #[test]
+    fn test_parse_too_many_teams_error() {
+        let input = "T1 vs T2\nT3 vs T4\nT5 vs T6\nT7 vs T8\nT9 vs T10\nT11 vs T1\n";
+        let result = parse_inputs(input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Too many teams"));
+    }
+
+    #[test]
+    fn test_parse_empty_input() {
+        let input = "# only comments\n\n";
+        let parsed = parse_inputs(input).unwrap();
+        assert_eq!(parsed.team_count, 0);
+        assert_eq!(parsed.completed_matches, 0);
+        assert_eq!(parsed.matches.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_multiple_completed_matches() {
+        let input = "SRH vs RCB : SRH\nRCB vs MI : MI\nSRH vs MI : NR\n";
+        let parsed = parse_inputs(input).unwrap();
+        assert_eq!(parsed.team_count, 3);
+        assert_eq!(parsed.completed_matches, 3);
+        assert_eq!(parsed.matches_played[0], 2);
+        assert_eq!(parsed.matches_played[1], 2);
+        assert_eq!(parsed.matches_played[2], 2);
+        assert_eq!(parsed.initial_state.points(0), 3);
+        assert_eq!(parsed.initial_state.points(1), 0);
+        assert_eq!(parsed.initial_state.points(2), 3);
+    }
+
+    #[test]
+    fn test_parse_seat_scale_for_10_teams() {
+        let input = "T1 vs T2\nT3 vs T4\nT5 vs T6\nT7 vs T8\nT9 vs T10\n";
+        let parsed = parse_inputs(input).unwrap();
+        assert_eq!(parsed.team_count, 10);
+        assert_eq!(parsed.seat_scale, 2520);
+    }
+
+    #[test]
+    fn test_canonical_normalization() {
+        assert_eq!(canonical("SRH"), "SRH");
+        assert_eq!(canonical("srh"), "SRH");
+        assert_eq!(canonical("S.R.H."), "SRH");
+        assert_eq!(canonical("RCB"), "RCB");
+    }
+
+    #[test]
+    fn test_parse_case_insensitive_outcome() {
+        let input = "SRH vs RCB : srh\n";
+        let parsed = parse_inputs(input).unwrap();
+        assert_eq!(parsed.initial_state.points(0), 2);
+    }
+
+    #[test]
+    fn test_parse_case_insensitive_nr() {
+        let input = "SRH vs RCB : nr\n";
+        let parsed = parse_inputs(input).unwrap();
+        assert_eq!(parsed.initial_state.points(0), 1);
+        assert_eq!(parsed.initial_state.points(1), 1);
+    }
+}

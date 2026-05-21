@@ -1,0 +1,7 @@
+# Invalid: too many teams (more than 10)
+T1 vs T2
+T3 vs T4
+T5 vs T6
+T7 vs T8
+T9 vs T10
+T11 vs T1

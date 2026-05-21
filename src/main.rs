@@ -1,24 +1,16 @@
-mod cli;
-mod models;
-mod parser;
-mod ranking;
-mod reporter;
-mod simulate;
-mod terminal;
-mod utils;
-
 use std::io::{self, IsTerminal};
 
-use crate::cli::parse_args;
-use crate::models::{Algorithm, AppError};
-use crate::parser::{parse_inputs, read_matches_file};
-use crate::reporter::Reporter;
-use crate::simulate::{SimulationRunner, auto::AutoSimulator, dfs::DfsSimulator, dp::DpSimulator};
-use crate::terminal::{Colors, Terminal};
+use ipl_playoff_calculator::{
+    Algorithm, AppError, AutoSimulator, Colors, DfsSimulator, DpSimulator, Reporter,
+    SimulationRunner, Terminal, parse_args, parse_inputs, read_matches_file,
+};
 
 fn run() -> Result<(), AppError> {
     let term = Terminal::new(io::stdout().is_terminal());
-    let cli = parse_args(&term)?;
+    let cli = match parse_args(std::env::args(), &term)? {
+        Some(c) => c,
+        None => return Ok(()),
+    };
     let matches_input = read_matches_file(&cli.file_path)?;
     let parsed = parse_inputs(&matches_input)?;
 

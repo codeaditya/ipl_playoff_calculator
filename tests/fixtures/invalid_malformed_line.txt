@@ -1,0 +1,2 @@
+# Invalid: malformed line with no separator
+SRH RCB
