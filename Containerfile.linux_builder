@@ -5,10 +5,11 @@ ENV RUSTUP_HOME=/opt/rustup \
     PATH=/opt/cargo/bin:${PATH}
 
 RUN dnf -y update && \
-    dnf -y install rsync gcc && \
+    dnf -y install rsync git gcc && \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
       sh -s -- -y \
         --default-toolchain stable \
-        --no-modify-path
+        --no-modify-path && \
+    dnf clean all
 
 WORKDIR /work

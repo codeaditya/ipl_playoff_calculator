@@ -2,6 +2,12 @@
 name = "ipl_playoff_calculator"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/codeaditya/ipl_playoff_calculator"
+description = "A high-performance CLI tool that computes each IPL team's probability of finishing in the Top 2 and Top 4 positions"
+license = "MIT"
+keywords = ["ipl", "sports", "calculator", "simulation", "probability"]
+categories = ["command-line-utilities"]
+default-run = "ipl_playoff_calculator"
 
 [dependencies]
 sysinfo = "0.39"

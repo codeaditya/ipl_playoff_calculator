@@ -7,11 +7,12 @@ ENV RUSTUP_HOME=/opt/rustup \
 RUN dnf -y update && \
     dnf -y install epel-release && \
     dnf config-manager --set-enabled crb && \
-    dnf -y install rsync gcc mingw64-gcc && \
+    dnf -y install rsync git gcc mingw64-gcc && \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
       sh -s -- -y \
         --default-toolchain stable \
         --target x86_64-pc-windows-gnu \
-        --no-modify-path
+        --no-modify-path && \
+    dnf clean all
 
 WORKDIR /work

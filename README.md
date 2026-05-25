@@ -17,7 +17,7 @@ number of remaining matches and available system RAM:
 |           | RAM is sufficient.                                                                  |
 | **Auto**  | **(Default)** Profiles available system RAM and optimally partitions work - uses    |
 |           | DFS for initial matches (reducing branching factor) and DP for the rest. Scales     |
-|           | gracefully from few to 52+ remaining matches.                                       |
+|           | gracefully from few to 52 remaining matches (the upper threshold).                  |
 
 ## Usage
 
@@ -32,7 +32,7 @@ Usage: ipl_playoff_calculator [--allow-no-results] [--algo=auto|dfs|dp] <matches
 | `<matches-file>`     | Path to the text file containing the schedule.                           |
 | `--allow-no-results` | Include ties/washouts (1 pt each) as possible future outcomes.           |
 | `--algo=dfs`         | DFS simulation: low RAM, slower for large match counts.                  |
-| `--algo=dp`          | DP simulation: fast for large match counts, high RAM usage.              |
+| `--algo=dp`          | DP simulation: high RAM, fast for large match counts.                    |
 | `--algo=auto`        | **(Default)** Dynamically scales between pure DP and Hybrid DFS-DP.      |
 
 ### Dev Only
@@ -40,7 +40,7 @@ Usage: ipl_playoff_calculator [--allow-no-results] [--algo=auto|dfs|dp] <matches
 | Flag             | Description                                                                  |
 |------------------|------------------------------------------------------------------------------|
 | `--calibrate-dp` | Run calibration to measure DP state counts, RAM usage, and compute time per  |
-|                  | depth. Used to tune the Auto mode cost model.                                |
+|                  | depth. Used to tune the DP algo cost model.                                  |
 
 ### Examples
 
@@ -71,8 +71,8 @@ RCB vs KKR
 ## Try it Online (Kaggle)
 
 A [Kaggle Notebook](https://www.kaggle.com/code/codeadi007/ipl-playoff-calculator-demo) is
-available to demo the calculator without building from source. It runs the Rust binary on a Linux
-VM and includes preloaded match data files.
+available to demo the calculator. It runs the Rust binary on a Linux VM and includes preloaded
+match data files.
 
 Kaggle provides **up to 30 GB RAM** to registered users (free account required), which is
 especially useful for the DP algorithm when the number of remaining matches is high - the auto mode
@@ -93,6 +93,27 @@ can leverage the full RAM to run larger DP batches, drastically reducing simulat
 ```
 
 Binaries are placed in `dist/`.
+
+See `./build.sh --help` for additional options (lint, individual image setup, image updates, etc.).
+
+### Testing
+
+The project includes a comprehensive test suite covering CLI argument parsing, file parsing, and
+simulation correctness. Integration tests are in [`tests/`](tests/) and unit tests alongside
+modules. Run them with:
+
+```bash
+./build.sh --test
+```
+
+`dump_golden` can be used to generate expected outcome data when we are confident that the
+algorithm already produces correct results. These are consumed by the test suite in
+`tests/simulation_correctness.rs` to detect drift from intended behavior during subsequent
+modifications:
+
+```bash
+./build.sh --dump-golden
+```
 
 ## License
 
