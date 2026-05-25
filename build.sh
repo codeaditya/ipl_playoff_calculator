@@ -15,7 +15,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 project_name="$(basename "$PWD")"
-bin_name="$project_name"
+bin_name="$(grep -B1 'path = "src/main.rs"' Cargo.toml | grep '^name = ' | cut -d'"' -f2)"
 
 log() {
   local color="$1"
@@ -29,6 +29,7 @@ show_help() {
   echo -e "${YELLOW}Options:${NC}"
   echo "  --linux                  Build the Linux application binary"
   echo "  --windows                Build the Windows application binary"
+  echo "  --lint                   Run the linter (fmt --check + clippy -D warnings)"
   echo "  --test                   Run the test suite"
   echo "  --dump-golden            Run the dump_golden utility to regenerate golden values"
   echo "  --setup                  Setup both the builder container images"
@@ -36,6 +37,7 @@ show_help() {
   echo "  --setup-windows-image    Setup the Windows builder container image"
   echo "  --update-linux-image     Update packages and Rust in the Linux container image"
   echo "  --update-windows-image   Update packages and Rust in the Windows container image"
+  echo "  --bin-name               Print the derived binary name and exit"
   echo "  --help                   Show this help message"
 }
 
@@ -78,80 +80,75 @@ update_container_image() {
   fi
 }
 
-build_linux_application_binary() {
-  log "$YELLOW" "--> Starting Linux Application Build..."
+run_in_container() {
+  local image="$1"
+  local description="$2"
+
+  setup_volume
+  log "$YELLOW" "--> $description..."
+
+  local tmpfile
+  tmpfile=$(mktemp)
+
+  cat > "$tmpfile"
+
   podman run --rm \
     -v "$CARGO_VOLUME_NAME":/cache/cargo \
     -v "$PWD":/work:Z \
     -w /work \
-    "$LINUX_BUILDER_IMAGE" \
+    -v "$tmpfile":/tmp/container_cmds.sh:Z \
+    "$image" \
     bash -lc "
       set -euo pipefail
       export CARGO_HOME=/cache/cargo/home
       export CARGO_TARGET_DIR=/cache/cargo/target/$project_name
       mkdir -p \"\$CARGO_HOME\" \"\$CARGO_TARGET_DIR\" dist
-      cargo fmt
-      cargo clippy --all-targets
-      cargo build --release
-      rsync -a \"\$CARGO_TARGET_DIR/release/$bin_name\" \"dist/$bin_name\"
+      source /tmp/container_cmds.sh
     "
+
+  rm -f "$tmpfile"
+}
+
+build_linux_application_binary() {
+  run_in_container "$LINUX_BUILDER_IMAGE" "Starting Linux Application Build..." <<INNER
+cargo fmt
+cargo clippy --all-targets
+cargo build --release
+rsync -a "\$CARGO_TARGET_DIR/release/$bin_name" "dist/$bin_name"
+INNER
   log "$GREEN" "SUCCESS: Linux binary is in dist/$bin_name"
 }
 
 build_windows_application_binary() {
-  log "$YELLOW" "--> Starting Windows Application Build..."
-  podman run --rm \
-    -v "$CARGO_VOLUME_NAME":/cache/cargo \
-    -v "$PWD":/work:Z \
-    -w /work \
-    "$WINDOWS_BUILDER_IMAGE" \
-    bash -lc "
-      set -euo pipefail
-      export CARGO_HOME=/cache/cargo/home
-      export CARGO_TARGET_DIR=/cache/cargo/target/$project_name
-      mkdir -p \"\$CARGO_HOME\" \"\$CARGO_TARGET_DIR\" dist
-      export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
-      cargo fmt
-      cargo clippy --all-targets
-      cargo build --release --target x86_64-pc-windows-gnu
-      rsync -a \"\$CARGO_TARGET_DIR/x86_64-pc-windows-gnu/release/$bin_name.exe\" \"dist/$bin_name.exe\"
-    "
+  run_in_container "$WINDOWS_BUILDER_IMAGE" "Starting Windows Application Build..." <<INNER
+export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+cargo fmt
+cargo clippy --all-targets
+cargo build --release --target x86_64-pc-windows-gnu
+rsync -a "\$CARGO_TARGET_DIR/x86_64-pc-windows-gnu/release/$bin_name.exe" "dist/$bin_name.exe"
+INNER
   log "$GREEN" "SUCCESS: Windows binary is in dist/$bin_name.exe"
 }
 
+run_lint() {
+  run_in_container "$LINUX_BUILDER_IMAGE" "Running linter (fmt + clippy)..." <<INNER
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+INNER
+  log "$GREEN" "SUCCESS: Lint passed"
+}
+
 run_tests() {
-  setup_volume
-  log "$YELLOW" "--> Running tests..."
-  podman run --rm \
-    -v "$CARGO_VOLUME_NAME":/cache/cargo \
-    -v "$PWD":/work:Z \
-    -w /work \
-    "$LINUX_BUILDER_IMAGE" \
-    bash -lc "
-      set -euo pipefail
-      export CARGO_HOME=/cache/cargo/home
-      export CARGO_TARGET_DIR=/cache/cargo/target/$project_name
-      mkdir -p \"\$CARGO_HOME\" \"\$CARGO_TARGET_DIR\"
-      cargo test
-    "
+  run_in_container "$LINUX_BUILDER_IMAGE" "Running tests..." <<INNER
+cargo test
+INNER
   log "$GREEN" "SUCCESS: All tests passed"
 }
 
 run_dump_golden() {
-  setup_volume
-  log "$YELLOW" "--> Running dump_golden utility..."
-  podman run --rm \
-    -v "$CARGO_VOLUME_NAME":/cache/cargo \
-    -v "$PWD":/work:Z \
-    -w /work \
-    "$LINUX_BUILDER_IMAGE" \
-    bash -lc "
-      set -euo pipefail
-      export CARGO_HOME=/cache/cargo/home
-      export CARGO_TARGET_DIR=/cache/cargo/target/$project_name
-      mkdir -p \"\$CARGO_HOME\" \"\$CARGO_TARGET_DIR\"
-      cargo run --bin dump_golden
-    "
+  run_in_container "$LINUX_BUILDER_IMAGE" "Running dump_golden utility..." <<INNER
+cargo run --bin dump_golden
+INNER
   log "$GREEN" "SUCCESS: dump_golden output complete"
 }
 
@@ -193,6 +190,10 @@ while [[ $# -gt 0 ]]; do
     build_windows_application_binary
     shift
     ;;
+  --lint)
+    run_lint
+    shift
+    ;;
   --test)
     run_tests
     shift
@@ -200,6 +201,10 @@ while [[ $# -gt 0 ]]; do
   --dump-golden)
     run_dump_golden
     shift
+    ;;
+  --bin-name)
+    echo "$bin_name"
+    exit 0
     ;;
   --help)
     show_help
