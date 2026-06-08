@@ -310,6 +310,7 @@ impl ProgressTracker {
                     },
                     term,
                     start_time,
+                    start_time,
                 );
                 last_drawn = done;
             }

@@ -93,7 +93,12 @@ pub enum ProgressPhase {
     },
 }
 
-pub fn draw_progress(phase: ProgressPhase, term: &Terminal, start_time: Instant) {
+pub fn draw_progress(
+    phase: ProgressPhase,
+    term: &Terminal,
+    start_time: Instant,
+    phase_start: Instant,
+) {
     let colors = &term.colors;
     let term_width = terminal_width();
 
@@ -102,9 +107,10 @@ pub fn draw_progress(phase: ProgressPhase, term: &Terminal, start_time: Instant)
         .unwrap_or_else(|| "N/A".to_string());
 
     let elapsed = start_time.elapsed().as_secs_f64();
+    let phase_elapsed = phase_start.elapsed().as_secs_f64();
     let (pct, info) = phase_info(&phase, colors);
     let eta = if pct > 0.0 && pct < 1.0 {
-        (elapsed / pct) - elapsed
+        (phase_elapsed / pct) - phase_elapsed
     } else {
         0.0
     };

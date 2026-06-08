@@ -215,6 +215,7 @@ impl DpSimulator {
         global_start_time: Instant,
         match_offset: usize,
     ) -> (Vec<Vec<(u128, u64)>>, usize) {
+        let phase_start = Instant::now();
         let total_matches = matches.len() + match_offset;
         let mut total_states = 1;
         let mut states: Vec<Vec<(u128, u64)>> = vec![vec![(branch_initial_state.score, 1)]];
@@ -228,6 +229,7 @@ impl DpSimulator {
                 },
                 term,
                 global_start_time,
+                phase_start,
             );
         }
 
@@ -245,6 +247,7 @@ impl DpSimulator {
                     },
                     term,
                     global_start_time,
+                    phase_start,
                 );
             }
         }
@@ -310,6 +313,7 @@ impl DpSimulator {
 
         // Main thread manages the UI loop
         if term.interactive {
+            let phase_start = Instant::now();
             let mut last_drawn = usize::MAX;
             loop {
                 let done = states_done.load(Ordering::Relaxed).min(total_states);
@@ -321,6 +325,7 @@ impl DpSimulator {
                         },
                         term,
                         global_start_time,
+                        phase_start,
                     );
                     last_drawn = done;
                 }
