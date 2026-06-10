@@ -17,37 +17,37 @@ use crate::utils::{
 
 /// d = Remaining matches that would purely run on DP Simulation excluding the seed match
 pub fn estimate_dp_cost(d: usize, base: u64) -> (f64, f64) {
-    // Determine the performance scaling factor based on threads.
-    // Derived from 12-thread (Ryzen) vs 4-thread (Kaggle) memory bandwidth scaling.
-    // The equation models throughput (M states/s): Thr(t) = A + B * threads
-    // We normalize against the 12-thread baseline (factor = 1.0).
-    let num_threads = determine_num_threads();
-    let thr_12t = 1.77 + 0.40 * 12.0;
-    let thr_current = 1.77 + 0.40 * (num_threads as f64);
-    let time_scale_factor = thr_12t / thr_current;
+    // Only the classifying stage is parallel. The building stage (merge) is
+    // single-threaded, so we scale only the classifying portion.
+    // We normalize against the 12-thread baseline on which we calibrated our run.
+    let time_scale_factor = 12.0 / (determine_num_threads() as f64);
 
     if base >= 3 {
-        // Calibrated from --calibrate run (base=3, 18 total matches (including the seed match)).
-        // Anchor: remaining=18; d=17.
+        // Calibrated from --calibrate-dp run (base=3, 19 total matches (including the seed match)).
+        // Anchor: remaining=19; d=18.
         // Growth rates: RAM ~2.168x per match, Time ~2.166x per match.
         // RAM includes a strict 15% safety pad to prevent OOM.
-        // Time uses the exact 12-thread curve fit.
         let diff = d as f64 - 18.0;
-        let ram_mb = 4_660.0 * 2.168_f64.powf(diff) * 1.2725;
-        let base_time_s = 20.0 * 2.166_f64.powf(diff);
+        let additional_ram_buffer = 1.2725;
+        let ram_mb = 4_660.0 * 2.168_f64.powf(diff) * additional_ram_buffer;
+        let build_time_s = 13.0 * 2.166_f64.powf(diff);
+        let classify_time_s = 6.5 * 2.166_f64.powf(diff);
+        let total_time_s = build_time_s + classify_time_s * time_scale_factor;
 
-        (ram_mb, base_time_s * time_scale_factor)
+        (ram_mb, total_time_s)
     } else {
-        // Calibrated from --calibrate run (base=2, 46 total matches (including the seed match)).
-        // Anchor: remaining=40; d=39.
+        // Calibrated from --calibrate-dp run (base=2, 49 total matches (including the seed match)).
+        // Anchor: remaining=41; d=40.
         // Growth rates: RAM ~1.222x per match, Time ~1.242x per match.
         // RAM includes a strict 15% safety pad to prevent OOM.
-        // Time uses the exact 12-thread curve fit.
         let diff = d as f64 - 40.0;
-        let ram_mb = 1_925.0 * 1.222_f64.powf(diff) * 1.15;
-        let base_time_s = 10.0 * 1.242_f64.powf(diff);
+        let additional_ram_buffer = 1.15;
+        let ram_mb = 1_925.0 * 1.222_f64.powf(diff) * additional_ram_buffer;
+        let build_time_s = 7.5 * 1.242_f64.powf(diff);
+        let classify_time_s = 2.0 * 1.242_f64.powf(diff);
+        let total_time_s = build_time_s + classify_time_s * time_scale_factor;
 
-        (ram_mb, base_time_s * time_scale_factor)
+        (ram_mb, total_time_s)
     }
 }
 
@@ -429,14 +429,24 @@ impl DpSimulator {
     pub fn run_calibration(&self, initial_state: StandingState, term: &Terminal) {
         let total = self.matches.len();
         println!(
-            "=============== DP Calibration ({} total matches, base={}) ================",
-            total, self.base
+            "{repeat} DP Calibration ({total} total matches, base={base}) {repeat}",
+            repeat = "=".repeat(26),
+            total = total,
+            base = self.base,
         );
         println!(
-            " {:>2} | {:>12} {:>10} {:>9} | {:>7} {:>10} {:>9}",
-            "d", "States", "Real RAM", "Real Time", "Auto DP", "Est RAM", "Est Time"
+            " {:>2} | {:>13} {:>11} {:>9} {:>9} {:>9} | {:>7} {:>11} {:>9}",
+            "d",
+            "States",
+            "Real RAM",
+            "Real Time",
+            "Build",
+            "Classify",
+            "Auto DP",
+            "Est RAM",
+            "Est Time"
         );
-        println!("{}", "-".repeat(74));
+        println!("{}", "-".repeat(95));
 
         let baseline_rss = current_rss_bytes().unwrap_or(0);
 
@@ -462,12 +472,14 @@ impl DpSimulator {
                 });
             }
 
-            let start = Instant::now();
+            let build_start = Instant::now();
             let (states, total_states) =
                 self.simulate_forward(initial_state, dp_matches, term, Instant::now(), 0);
-            let _counts = self.classify_states_parallel(states, total_states, term, Instant::now());
+            let time_build_raw = build_start.elapsed().as_secs_f64();
 
-            let elapsed = start.elapsed().as_secs_f64();
+            let classify_start = Instant::now();
+            let _counts = self.classify_states_parallel(states, total_states, term, Instant::now());
+            let time_classify_raw = classify_start.elapsed().as_secs_f64();
 
             // Stop the poller and read peak.
             stop_flag.store(1, Ordering::Relaxed);
@@ -477,23 +489,27 @@ impl DpSimulator {
             let peak_ram = peak_rss.saturating_sub(baseline_rss);
 
             // Multiply by base: pure DP runs `base` branches sequentially.
-            let total_time = elapsed * self.base as f64;
+            let build_time = time_build_raw * self.base as f64;
+            let classify_time = time_classify_raw * self.base as f64;
+            let total_time = build_time + classify_time;
 
             // Auto Strategy parameters if we had exactly `d` matches remaining
             let auto_optimized_strategy = AutoOptimizedStrategy::for_remaining(d + 1, self.base);
 
             println!(
-                " {:>2} | {:>12} {:>10} {:>8.2}s | {:>7} {:>10} {:>8.2}s",
+                " {:>2} | {:>13} {:>11} {:>8.2}s {:>8.2}s {:>8.2}s | {:>7} {:>11} {:>8.2}s",
                 d,
                 format_with_commas(total_states as u64),
                 fmt_mem(peak_ram),
                 total_time,
+                build_time,
+                classify_time,
                 auto_optimized_strategy.optimal_dp_size,
                 fmt_mem(auto_optimized_strategy.est_peak_ram_mb as u64 * 1024 * 1024),
                 auto_optimized_strategy.est_compute_time
             );
         }
 
-        println!("{}", "-".repeat(74));
+        println!("{}", "-".repeat(95));
     }
 }
