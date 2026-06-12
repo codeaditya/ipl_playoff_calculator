@@ -2,45 +2,39 @@ name: Continuous Release
 
 on:
   push:
-    branches:
-      - main
+  pull_request:
   workflow_dispatch:
 
 permissions:
   actions: write    # needed to delete stale caches
   contents: write   # needed to force-push 'continuous' tag and edit the release
 
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  SHORT_SHA: ${{ github.sha }}
+  CARGO_VOLUME_NAME: cargo-cache
+  LINUX_BUILDER_IMAGE: rust_linux_builder
+  WINDOWS_CARGO_CACHE_KEY_PREFIX: windows:cargo-cache
+  LINUX_CARGO_CACHE_KEY_PREFIX: linux:cargo-cache
+  LINUX_BUILDER_IMAGE_CACHE_KEY_PREFIX: image:rust_linux_builder
+
 jobs:
-  build:
+  # ===========================================================================
+  # Job 1 · prepare
+  # ===========================================================================
+  prepare:
+    name: Prepare
     runs-on: ubuntu-latest
 
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      CARGO_VOLUME_NAME: cargo-cache
-      LINUX_BUILDER_IMAGE: rust_linux_builder
-      WINDOWS_BUILDER_IMAGE: rust_windows_builder
-      CARGO_CACHE_KEY_PREFIX: cached-volume:cargo-cache
-      LINUX_BUILDER_IMAGE_CACHE_KEY_PREFIX: cached-image:rust_linux_builder
-      WINDOWS_BUILDER_IMAGE_CACHE_KEY_PREFIX: cached-image:rust_windows_builder
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Make build script executable
-        run: chmod +x ./build.sh
-
-      - name: Derive binary name from Cargo.toml
-        run: echo "BIN_NAME=$(./build.sh --bin-name)" >> "$GITHUB_ENV"
-
-      # == Evict stale caches older than 7 days before restoring ==============
       - name: Delete stale caches (older than 7 days)
         run: |
           SEVEN_DAYS_AGO=$(date -d '7 days ago' --utc +%s)
 
-          for KEY_PREFIX in "${{ env.CARGO_CACHE_KEY_PREFIX }}-" "${{ env.LINUX_BUILDER_IMAGE_CACHE_KEY_PREFIX }}-" "${{ env.WINDOWS_BUILDER_IMAGE_CACHE_KEY_PREFIX }}-"; do
+          for KEY_PREFIX in \
+              "${{ env.WINDOWS_CARGO_CACHE_KEY_PREFIX }}:" \
+              "${{ env.LINUX_CARGO_CACHE_KEY_PREFIX }}:" \
+              "${{ env.LINUX_BUILDER_IMAGE_CACHE_KEY_PREFIX }}:"; do
             echo "Checking caches with prefix: $KEY_PREFIX"
             gh cache list \
               --repo "$GITHUB_REPOSITORY" \
@@ -55,15 +49,30 @@ jobs:
               done
           done
 
-      # == Cargo cache (named volume backing directory) =======================
+  # ===========================================================================
+  # Job 2 · build-linux
+  # ===========================================================================
+  build-linux:
+    name: Lint, Test & Build (Linux)
+    runs-on: ubuntu-latest
+    needs: prepare
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Make build script executable
+        run: chmod +x ./build.sh
+
+      - name: Derive binary name from Cargo.toml
+        run: echo "BIN_NAME=$(./build.sh --bin-name)" >> "$GITHUB_ENV"
+
+      # == Cargo cache container volume =======================================
       - name: Restore cargo cache
-        id: cargo-cache
         uses: actions/cache@v5
         with:
           path: ~/.local/share/containers/storage/volumes/${{ env.CARGO_VOLUME_NAME }}
-          key: ${{ env.CARGO_CACHE_KEY_PREFIX }}-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
-          restore-keys: |
-            ${{ env.CARGO_CACHE_KEY_PREFIX }}-
+          key: ${{ env.LINUX_CARGO_CACHE_KEY_PREFIX }}:${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
 
       # == Container image cache: Linux builder ===============================
       - name: Restore Linux builder image from cache
@@ -71,7 +80,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: /tmp/${{ env.LINUX_BUILDER_IMAGE }}.tar
-          key: ${{ env.LINUX_BUILDER_IMAGE_CACHE_KEY_PREFIX }}-${{ hashFiles('Containerfile.linux_builder') }}
+          key: ${{ env.LINUX_BUILDER_IMAGE_CACHE_KEY_PREFIX }}:${{ hashFiles('Containerfile.linux_builder') }}
 
       - name: Load cached Linux builder image into Podman
         if: steps.linux-builder-image-cache.outputs.cache-hit == 'true'
@@ -85,42 +94,109 @@ jobs:
         if: steps.linux-builder-image-cache.outputs.cache-hit != 'true'
         run: podman save --output /tmp/${{ env.LINUX_BUILDER_IMAGE }}.tar ${{ env.LINUX_BUILDER_IMAGE }}
 
-      # == Container image cache: Windows builder =============================
-      - name: Restore Windows builder image from cache
-        id: windows-builder-image-cache
-        uses: actions/cache@v5
-        with:
-          path: /tmp/${{ env.WINDOWS_BUILDER_IMAGE }}.tar
-          key: ${{ env.WINDOWS_BUILDER_IMAGE_CACHE_KEY_PREFIX }}-${{ hashFiles('Containerfile.windows_builder') }}
-
-      - name: Load cached Windows builder image into Podman
-        if: steps.windows-builder-image-cache.outputs.cache-hit == 'true'
-        run: podman load --input /tmp/${{ env.WINDOWS_BUILDER_IMAGE }}.tar
-
-      - name: Setup Windows builder image
-        if: steps.windows-builder-image-cache.outputs.cache-hit != 'true'
-        run: ./build.sh --setup-windows-image
-
-      - name: Save Windows builder image to cache
-        if: steps.windows-builder-image-cache.outputs.cache-hit != 'true'
-        run: podman save --output /tmp/${{ env.WINDOWS_BUILDER_IMAGE }}.tar ${{ env.WINDOWS_BUILDER_IMAGE }}
-
-      # == Lint ================================================================
+      # == Lint ===============================================================
       - name: Run linter
         continue-on-error: true
         run: ./build.sh --lint
 
-      # == Test ================================================================
+      # == Test ===============================================================
       - name: Run tests
         run: ./build.sh --test
 
-      # == Build Linux binaries ===============================================
-      - name: Build Linux binaries
+      # == Build Linux binary =================================================
+      - name: Build Linux binary
         run: ./build.sh --linux
 
-      # == Build Windows binaries =============================================
-      - name: Build Windows binaries
-        run: ./build.sh --windows
+      # == Upload Linux binary ================================================
+      - name: Upload Linux binary as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-binary
+          path: dist/${{ env.BIN_NAME }}
+          archive: false
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job 3 · build-windows
+  # ===========================================================================
+  build-windows:
+    name: Lint, Test & Build (Windows)
+    runs-on: windows-latest
+    needs: prepare
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Derive binary name from Cargo.toml
+        shell: bash
+        run: echo "BIN_NAME=$(bash build.sh --bin-name)" >> "$GITHUB_ENV"
+
+      - name: Set cargo env vars
+        run: |
+          echo "CARGO_HOME=$HOME\.cargo" >> $env:GITHUB_ENV
+          echo "CARGO_TARGET_DIR=$HOME\.cargo\target" >> $env:GITHUB_ENV
+
+      # == Windows Cargo Cache ================================================
+      - name: Restore cargo cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.CARGO_HOME }}
+          key: ${{ env.WINDOWS_CARGO_CACHE_KEY_PREFIX }}:${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
+
+      # == Lint ===============================================================
+      - name: Run linter
+        continue-on-error: true
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+
+      # == Test ===============================================================
+      - name: Run tests
+        run: cargo test
+
+      # == Build Windows binary ===============================================
+      - name: Build Windows binary
+        run: |
+          cargo fmt
+          cargo clippy --all-targets
+          cargo build --release
+
+      # == Upload Windows binary ==============================================
+      - name: Upload Windows binary as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-binary
+          path: ${{ env.CARGO_TARGET_DIR }}/release/${{ env.BIN_NAME }}.exe
+          archive: false
+          if-no-files-found: error
+
+  # ===========================================================================
+  # Job 4 · release
+  # ===========================================================================
+  release:
+    name: Tag & Release
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Make build script executable
+        run: chmod +x ./build.sh
+
+      - name: Derive binary name from Cargo.toml
+        run: echo "BIN_NAME=$(./build.sh --bin-name)" >> "$GITHUB_ENV"
+
+      - name: Download all the uploaded artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist/
+          merge-multiple: true
 
       # == Force-push the 'continuous' tag to current HEAD ====================
       - name: Move 'continuous' tag to HEAD
@@ -132,8 +208,6 @@ jobs:
 
       # == Create or update the rolling 'continuous' release ==================
       - name: Update rolling 'continuous' release
-        env:
-          SHORT_SHA: ${{ github.sha }}
         run: |
           TAG="continuous"
           TITLE="Continuous Release"
@@ -145,9 +219,9 @@ jobs:
 
           **Binaries:**
 
-          | Platform | File | SHA256 Checksum |
-          |----------|------|-----------------|
-          | Linux x86_64 | \`${BIN_NAME}\` | \`$LINUX_BINARY_CHECKSUM\` |
+          | Platform       | File                | SHA256 Checksum              |
+          |----------------|---------------------|------------------------------|
+          | Linux x86_64   | \`${BIN_NAME}\`     | \`$LINUX_BINARY_CHECKSUM\`   |
           | Windows x86_64 | \`${BIN_NAME}.exe\` | \`$WINDOWS_BINARY_CHECKSUM\` |"
 
           # Delete existing release (ignore errors if it doesn't exist yet)
