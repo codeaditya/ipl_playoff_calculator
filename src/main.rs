@@ -2,7 +2,7 @@ use std::io::{self, IsTerminal};
 
 use ipl_playoff_calculator::{
     Algorithm, AppError, AutoSimulator, Colors, DfsSimulator, DpSimulator, Reporter,
-    SimulationRunner, Terminal, parse_args, parse_inputs, read_matches_file,
+    SimulationRunner, Terminal, calibrate_dp, parse_args, parse_inputs, read_matches_file,
 };
 
 fn run() -> Result<(), AppError> {
@@ -16,7 +16,7 @@ fn run() -> Result<(), AppError> {
 
     if cli.calibrate_dp {
         let dp = DpSimulator::new(&parsed, cli.allow_no_results);
-        dp.run_calibration(parsed.initial_state, &Terminal::new(false));
+        calibrate_dp(&dp, parsed.initial_state);
         return Ok(());
     }
 

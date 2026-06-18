@@ -1,4 +1,5 @@
 pub mod auto;
+pub mod cost;
 pub mod dfs;
 pub mod dp;
 

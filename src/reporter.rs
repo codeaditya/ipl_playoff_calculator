@@ -3,7 +3,7 @@ use crate::models::{
 };
 use crate::ranking::sort_teams;
 use crate::simulate::auto::AutoOptimizedStrategy;
-use crate::simulate::dp::estimate_dp_cost;
+use crate::simulate::cost::estimate_dp_cost;
 use crate::terminal::{Colors, Terminal};
 use crate::utils::{
     fmt_pct, fmt_scaled_pct, format_with_commas, get_free_system_ram_mb, get_usable_ram_mb,

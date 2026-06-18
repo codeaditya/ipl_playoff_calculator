@@ -1,7 +1,8 @@
 use std::time::Instant;
 
+use super::cost::estimate_dp_cost;
 use super::dfs::DfsSimulator;
-use super::dp::{DpSimulator, estimate_dp_cost};
+use super::dp::DpSimulator;
 use crate::models::{
     AllCounts, Counts, ParsedInput, SLOT_A, SLOT_B, SLOT_NR, SLOT_UNSET, StandingState,
 };

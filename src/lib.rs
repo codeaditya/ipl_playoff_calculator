@@ -12,5 +12,7 @@ pub use models::{Algorithm, AllCounts, AppError, Counts, ParsedInput, StandingSt
 pub use parser::{parse_inputs, read_matches_file};
 pub use ranking::Ranker;
 pub use reporter::Reporter;
-pub use simulate::{SimulationRunner, auto::AutoSimulator, dfs::DfsSimulator, dp::DpSimulator};
+pub use simulate::{
+    SimulationRunner, auto::AutoSimulator, cost::calibrate_dp, dfs::DfsSimulator, dp::DpSimulator,
+};
 pub use terminal::{Colors, Terminal};

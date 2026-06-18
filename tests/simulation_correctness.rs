@@ -678,7 +678,7 @@ fn test_auto_25_matches_golden() {
 
 #[test]
 fn test_auto_forced_hybrid_25_matches_golden() {
-    let (dp_ram_mb, _) = ipl_playoff_calculator::simulate::dp::estimate_dp_cost(24, 2);
+    let (dp_ram_mb, _) = ipl_playoff_calculator::simulate::cost::estimate_dp_cost(24, 2);
     ipl_playoff_calculator::utils::set_system_ram_override(Some(dp_ram_mb));
 
     let input = load_fixture("valid_25_remaining");
