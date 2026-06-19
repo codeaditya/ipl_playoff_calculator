@@ -82,10 +82,6 @@ impl Reporter {
         self.seat_scale
     }
 
-    pub fn completed_matches(&self) -> usize {
-        self.completed_matches
-    }
-
     fn standings_table_width(&self) -> usize {
         // pos_w + team_w + 5 stats columns + 6 space separators
         self.layout.pos_w + self.layout.team_w + (5 * self.layout.stat_w) + 6
@@ -150,7 +146,6 @@ impl Reporter {
     pub fn print_simulation_header(
         &self,
         algorithm: Algorithm,
-        completed_matches: usize,
         remaining_matches: usize,
         base: u64,
         total_scenarios: u64,
@@ -162,7 +157,7 @@ impl Reporter {
         );
         println!(
             "  {}Matches Completed :{} {}",
-            self.colors.magenta, self.colors.reset, completed_matches
+            self.colors.magenta, self.colors.reset, self.completed_matches
         );
         println!(
             "  {}Matches Remaining :{} {}",
@@ -241,7 +236,44 @@ impl Reporter {
         println!();
     }
 
-    pub fn print_current_probabilities_heading(&self) {
+    pub fn print_probability_results(
+        &self,
+        all_counts: &AllCounts,
+        total_scenarios: u64,
+        base: u64,
+    ) {
+        self.print_current_probabilities_heading();
+        self.print_results(&all_counts.overall, total_scenarios);
+
+        if let Some((a, b)) = self.next_match {
+            let cond_total = total_scenarios / base;
+
+            println!();
+            self.print_next_match_impact_heading();
+
+            let title_a = format!("If {} beats {}", self.team_names[a], self.team_names[b]);
+            self.print_next_match_scenario_heading(&title_a);
+            self.print_results(&all_counts.if_a_wins, cond_total);
+            println!();
+
+            let title_b = format!("If {} beats {}", self.team_names[b], self.team_names[a]);
+            self.print_next_match_scenario_heading(&title_b);
+            self.print_results(&all_counts.if_b_wins, cond_total);
+            println!();
+
+            if self.allow_no_results {
+                let title_nr = format!(
+                    "If {} vs {} ends in NR",
+                    self.team_names[a], self.team_names[b]
+                );
+                self.print_next_match_scenario_heading(&title_nr);
+                self.print_results(&all_counts.if_nr, cond_total);
+                println!();
+            }
+        }
+    }
+
+    fn print_current_probabilities_heading(&self) {
         let heading_text = format!(
             "========= Current Probabilities after Match {} =========",
             self.completed_matches
@@ -255,7 +287,7 @@ impl Reporter {
         );
     }
 
-    pub fn print_next_match_impact_heading(&self) {
+    fn print_next_match_impact_heading(&self) {
         if let Some((a, b)) = self.next_match {
             let heading_text = format!(
                 "========= Impact of Next Match {}: {} vs {} =========",
@@ -273,7 +305,7 @@ impl Reporter {
         }
     }
 
-    pub fn print_next_match_scenario_heading(&self, title: &str) {
+    fn print_next_match_scenario_heading(&self, title: &str) {
         let heading_text = format!("========= {} =========", title);
         println!(
             "{}{:^width$}{}",
@@ -284,7 +316,7 @@ impl Reporter {
         );
     }
 
-    pub fn print_results(&self, counts: &Counts, total_scenarios: u64) {
+    fn print_results(&self, counts: &Counts, total_scenarios: u64) {
         let mut rows: Vec<Row> = (0..self.team_count)
             .map(|i| Row {
                 team: self.team_names[i].clone(),
@@ -333,43 +365,6 @@ impl Reporter {
                 team_w = self.layout.team_w,
                 pct_w = self.layout.pct_w,
             );
-        }
-    }
-
-    pub fn print_probability_results(
-        &self,
-        all_counts: &AllCounts,
-        total_scenarios: u64,
-        base: u64,
-    ) {
-        self.print_current_probabilities_heading();
-        self.print_results(&all_counts.overall, total_scenarios);
-
-        if let Some((a, b)) = self.next_match {
-            let cond_total = total_scenarios / base;
-
-            println!();
-            self.print_next_match_impact_heading();
-
-            let title_a = format!("If {} beats {}", self.team_names[a], self.team_names[b]);
-            self.print_next_match_scenario_heading(&title_a);
-            self.print_results(&all_counts.if_a_wins, cond_total);
-            println!();
-
-            let title_b = format!("If {} beats {}", self.team_names[b], self.team_names[a]);
-            self.print_next_match_scenario_heading(&title_b);
-            self.print_results(&all_counts.if_b_wins, cond_total);
-            println!();
-
-            if self.allow_no_results {
-                let title_nr = format!(
-                    "If {} vs {} ends in NR",
-                    self.team_names[a], self.team_names[b]
-                );
-                self.print_next_match_scenario_heading(&title_nr);
-                self.print_results(&all_counts.if_nr, cond_total);
-                println!();
-            }
         }
     }
 }

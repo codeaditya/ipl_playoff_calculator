@@ -38,7 +38,6 @@ impl SimulationRunner {
                 SimulationRunner::Dp(_) => Algorithm::Dp,
                 SimulationRunner::Auto(_) => Algorithm::Auto,
             },
-            reporter.completed_matches(),
             remaining,
             base_val,
             total_scenarios,
