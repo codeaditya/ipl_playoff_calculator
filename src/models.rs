@@ -57,8 +57,11 @@ impl std::fmt::Display for AppError {
 // DATA MODELS
 // ================================================================
 
-pub const TEAM_BITS: usize = 10;
-pub const TEAM_MASK: u128 = 0x3FF;
+pub const TEAM_BITS: usize = 11;
+pub const WIN_BITS: usize = 5;
+
+pub const TEAM_MASK: u128 = (1u128 << TEAM_BITS) - 1;
+pub const WIN_MASK: u128 = (1u128 << WIN_BITS) - 1;
 pub const TEAM_SHIFTS: [u32; MAX_TEAMS] = {
     let mut shifts = [0u32; MAX_TEAMS];
     let mut i = 0;
@@ -69,8 +72,8 @@ pub const TEAM_SHIFTS: [u32; MAX_TEAMS] = {
     shifts
 };
 
-pub const WIN_SCORE_DELTA: u128 = (2 << 4) | 1; // 33 (2 points, 1 win)
-pub const NR_SCORE_DELTA: u128 = 1 << 4; // 16 (1 point, 0 wins)
+pub const WIN_SCORE_DELTA: u128 = (2 << WIN_BITS) | 1; // 65 (2 points, 1 win) when WIN_BITS=5
+pub const NR_SCORE_DELTA: u128 = 1 << WIN_BITS; // 32 (1 point, 0 wins) when WIN_BITS=5
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct StandingState {
@@ -102,12 +105,12 @@ impl StandingState {
 
     #[inline]
     pub fn points(&self, team: usize) -> u8 {
-        (((self.score >> (team * TEAM_BITS)) & TEAM_MASK) >> 4) as u8
+        (((self.score >> (team * TEAM_BITS)) & TEAM_MASK) >> WIN_BITS) as u8
     }
 
     #[inline]
     pub fn wins(&self, team: usize) -> u8 {
-        ((self.score >> (team * TEAM_BITS)) & 0xF) as u8
+        ((self.score >> (team * TEAM_BITS)) & WIN_MASK) as u8
     }
 }
 
@@ -173,10 +176,12 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(TEAM_BITS, 10);
-        assert_eq!(TEAM_MASK, 0x3FF);
-        assert_eq!(WIN_SCORE_DELTA, 33);
-        assert_eq!(NR_SCORE_DELTA, 16);
+        assert_eq!(TEAM_BITS, 11);
+        assert_eq!(WIN_BITS, 5);
+        assert_eq!(TEAM_MASK, 0b0111_1111_1111);
+        assert_eq!(WIN_MASK, 0b0001_1111);
+        assert_eq!(WIN_SCORE_DELTA, 65);
+        assert_eq!(NR_SCORE_DELTA, 32);
         assert_eq!(SLOT_UNSET, 0);
         assert_eq!(SLOT_A, 1);
         assert_eq!(SLOT_B, 2);

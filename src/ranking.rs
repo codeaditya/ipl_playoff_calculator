@@ -123,11 +123,11 @@ pub fn sort_teams(team_count: usize, scores: &[u16; MAX_TEAMS]) -> [usize; MAX_T
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::TEAM_BITS;
+    use crate::models::{TEAM_BITS, WIN_BITS};
     use crate::utils::seat_scale_for_team_count;
 
     fn packed_score(points: u16, wins: u16) -> u16 {
-        (points << 4) | wins
+        (points << WIN_BITS) | wins
     }
 
     #[test]
