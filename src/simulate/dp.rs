@@ -126,6 +126,23 @@ impl DpSimulator {
         let mut current_chunk = 0;
         let mut last_freed_chunk = 0;
 
+        // Cache the initial values before the loop
+        let mut val_a = if idx_a < len {
+            scores[0][0] + delta_a
+        } else {
+            u128::MAX
+        };
+        let mut val_b = if idx_b < len {
+            scores[0][0] + delta_b
+        } else {
+            u128::MAX
+        };
+        let mut val_nr = if idx_nr < len {
+            scores[0][0] + delta_nr
+        } else {
+            u128::MAX
+        };
+
         while idx_a < len || idx_b < len || idx_nr < len {
             let min_idx = idx_a.min(idx_b).min(idx_nr);
             let safe_to_free_chunk = min_idx >> CHUNK_SHIFT;
@@ -135,52 +152,39 @@ impl DpSimulator {
                 last_freed_chunk += 1;
             }
 
-            let score_a = if idx_a < len {
-                scores[idx_a >> CHUNK_SHIFT][idx_a & CHUNK_MASK]
-            } else {
-                u128::MAX
-            };
-            let score_b = if idx_b < len {
-                scores[idx_b >> CHUNK_SHIFT][idx_b & CHUNK_MASK]
-            } else {
-                u128::MAX
-            };
-            let score_nr = if idx_nr < len {
-                scores[idx_nr >> CHUNK_SHIFT][idx_nr & CHUNK_MASK]
-            } else {
-                u128::MAX
-            };
-
-            let val_a = if idx_a < len {
-                score_a + delta_a
-            } else {
-                u128::MAX
-            };
-            let val_b = if idx_b < len {
-                score_b + delta_b
-            } else {
-                u128::MAX
-            };
-            let val_nr = if idx_nr < len {
-                score_nr + delta_nr
-            } else {
-                u128::MAX
-            };
-
+            // Use the cached variables to find the minimum
             let min_val = val_a.min(val_b).min(val_nr);
             let mut w = 0;
 
+            // Only fetch from memory and recalculate if this specific stream won
             if val_a == min_val {
                 w += weights[idx_a >> CHUNK_SHIFT][idx_a & CHUNK_MASK];
                 idx_a += 1;
+                val_a = if idx_a < len {
+                    scores[idx_a >> CHUNK_SHIFT][idx_a & CHUNK_MASK] + delta_a
+                } else {
+                    u128::MAX
+                };
             }
+
             if val_b == min_val {
                 w += weights[idx_b >> CHUNK_SHIFT][idx_b & CHUNK_MASK];
                 idx_b += 1;
+                val_b = if idx_b < len {
+                    scores[idx_b >> CHUNK_SHIFT][idx_b & CHUNK_MASK] + delta_b
+                } else {
+                    u128::MAX
+                };
             }
+
             if val_nr == min_val {
                 w += weights[idx_nr >> CHUNK_SHIFT][idx_nr & CHUNK_MASK];
                 idx_nr += 1;
+                val_nr = if idx_nr < len {
+                    scores[idx_nr >> CHUNK_SHIFT][idx_nr & CHUNK_MASK] + delta_nr
+                } else {
+                    u128::MAX
+                };
             }
 
             if next_scores[current_chunk].len() == CHUNK_SIZE {
@@ -188,6 +192,7 @@ impl DpSimulator {
                 next_weights.push(Vec::with_capacity(CHUNK_SIZE));
                 current_chunk += 1;
             }
+
             next_scores[current_chunk].push(min_val);
             next_weights[current_chunk].push(w);
             next_len += 1;
