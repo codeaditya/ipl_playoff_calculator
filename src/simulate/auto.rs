@@ -96,12 +96,12 @@ impl AutoSimulator {
         term: &Terminal,
     ) -> Counts {
         let start_time = Instant::now();
-        let (states, total_states) =
+        let states =
             self.dp_simulator
                 .simulate_forward(start_state, remaining_matches, term, start_time, 0);
         println!();
         self.dp_simulator
-            .classify_states_parallel(states, total_states, term, start_time)
+            .classify_states_parallel(states, term, start_time)
     }
 
     pub fn run(

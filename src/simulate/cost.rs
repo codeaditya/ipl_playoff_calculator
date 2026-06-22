@@ -22,9 +22,9 @@ pub fn estimate_dp_cost(d: usize, base: u64) -> (f64, f64) {
         // RAM includes a strict 15% safety pad to prevent OOM.
         let diff = d as f64 - 18.0;
         let additional_ram_buffer = 1.2725;
-        let ram_mb = 4_660.0 * 2.168_f64.powf(diff) * additional_ram_buffer;
-        let build_time_s = 13.0 * 2.166_f64.powf(diff);
-        let classify_time_s = 6.5 * 2.166_f64.powf(diff);
+        let ram_mb = 3_480.0 * 2.168_f64.powf(diff) * additional_ram_buffer;
+        let build_time_s = 11.4 * 2.166_f64.powf(diff);
+        let classify_time_s = 6.1 * 2.166_f64.powf(diff);
         let total_time_s = build_time_s + classify_time_s * time_scale_factor;
 
         (ram_mb, total_time_s)
@@ -35,9 +35,9 @@ pub fn estimate_dp_cost(d: usize, base: u64) -> (f64, f64) {
         // RAM includes a strict 15% safety pad to prevent OOM.
         let diff = d as f64 - 40.0;
         let additional_ram_buffer = 1.15;
-        let ram_mb = 1_925.0 * 1.222_f64.powf(diff) * additional_ram_buffer;
-        let build_time_s = 7.5 * 1.242_f64.powf(diff);
-        let classify_time_s = 2.0 * 1.242_f64.powf(diff);
+        let ram_mb = 1_435.0 * 1.222_f64.powf(diff) * additional_ram_buffer;
+        let build_time_s = 6.5 * 1.242_f64.powf(diff);
+        let classify_time_s = 1.8 * 1.242_f64.powf(diff);
         let total_time_s = build_time_s + classify_time_s * time_scale_factor;
 
         (ram_mb, total_time_s)
@@ -92,12 +92,12 @@ pub fn calibrate_dp(sim: &DpSimulator, initial_state: StandingState) {
         }
 
         let build_start = Instant::now();
-        let (states, total_states) =
-            sim.simulate_forward(initial_state, dp_matches, &term, Instant::now(), 0);
+        let states = sim.simulate_forward(initial_state, dp_matches, &term, Instant::now(), 0);
+        let total_states = states.total_states;
         let time_build_raw = build_start.elapsed().as_secs_f64();
 
         let classify_start = Instant::now();
-        let _counts = sim.classify_states_parallel(states, total_states, &term, Instant::now());
+        let _counts = sim.classify_states_parallel(states, &term, Instant::now());
         let time_classify_raw = classify_start.elapsed().as_secs_f64();
 
         // Stop the poller and read peak.

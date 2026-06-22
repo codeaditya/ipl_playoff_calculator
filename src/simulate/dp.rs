@@ -19,19 +19,30 @@ use crate::utils::{determine_num_threads, pow_u64};
 // Merges states with identical standings after each match.
 // A state is stored as a packed u128 score vector.
 //
-// The weight attached to each state tracks three counters:
-// [0] if_a_wins – scenarios where the first remaining match was won by team A
-// [1] if_b_wins – scenarios where the first remaining match was won by team B
-// [2] if_nr – scenarios where the first remaining match was a no-result
-//
-// overall is not stored explicitly; it is reconstructed later as
-// if_a_wins + if_b_wins + if_nr.
-//
 // After all matches are processed, each unique final state is
 // classified once and multiplied by its weights — replacing 3^N leaf
 // classifications with O(distinct_states) classifications.
 //
+// Each state is stored using a Structure-of-Arrays (SoA) layout —
+// chunked Vecs of scores (u128) and weights (u64). During the 3-way
+// merge in process_next_match, only scores are loaded for comparison;
+// weights are loaded only when a stream's value is selected as the
+// minimum.
+//
+// Chunking (Vec<Vec<T>> instead of Vec<T>): each inner Vec holds
+// CHUNK_SIZE elements. As the 3-way merge's linear scan advances,
+// chunks whose entire index range has been consumed (min_idx >>
+// CHUNK_SHIFT) are freed immediately via Vec::new(). This keeps
+// peak memory close to max(input_size, output_size) rather than
+// input_size + output_size.
+//
 // Progress: emits a per-match progress bar (one tick per match).
+
+pub struct States {
+    pub scores: Vec<Vec<u128>>,
+    pub weights: Vec<Vec<u64>>,
+    pub total_states: usize,
+}
 
 #[derive(Clone)]
 pub struct DpSimulator {
@@ -68,21 +79,31 @@ impl DpSimulator {
     }
 
     /// == CORE MERGE LOGIC ===================================================
+    /// Merges three derived sequences (A-wins, B-wins, NR) into one
+    /// sorted output, combining weights for duplicate scores.
     fn process_next_match(
         &self,
-        mut states: Vec<Vec<(u128, u64)>>,
+        mut scores: Vec<Vec<u128>>,
+        mut weights: Vec<Vec<u64>>,
         total_states: usize,
         a: usize,
         b: usize,
-    ) -> (Vec<Vec<(u128, u64)>>, usize) {
-        const CHUNK_SHIFT: usize = 18;
-        const CHUNK_MASK: usize = 0x3FFFF;
-        const CHUNK_SIZE: usize = 262_144;
+    ) -> States {
+        // Chunk size is chosen so a full chunk pair stays within typical
+        // 8-32 MB L3 cache.
+        // scores (16 B) + weights (8 B) = 24 B/state, so 2^17 × 24 = 3 MB
+        // >> CHUNK_SHIFT --> chunk index (fast division)
+        // & CHUNK_MASK   --> position within chunk (fast modulo)
+        const CHUNK_SHIFT: usize = 17;
+        const CHUNK_SIZE: usize = 1 << CHUNK_SHIFT;
+        const CHUNK_MASK: usize = CHUNK_SIZE - 1;
 
         let expected_len = (total_states * 15) / 10;
         let expected_chunks = (expected_len / CHUNK_SIZE) + 1;
-        let mut next_states = Vec::with_capacity(expected_chunks);
-        next_states.push(Vec::with_capacity(CHUNK_SIZE));
+        let mut next_scores = Vec::with_capacity(expected_chunks);
+        let mut next_weights = Vec::with_capacity(expected_chunks);
+        next_scores.push(Vec::with_capacity(CHUNK_SIZE));
+        next_weights.push(Vec::with_capacity(CHUNK_SIZE));
 
         let delta_a = WIN_SCORE_DELTA << (a * TEAM_BITS);
         let delta_b = WIN_SCORE_DELTA << (b * TEAM_BITS);
@@ -109,38 +130,39 @@ impl DpSimulator {
             let min_idx = idx_a.min(idx_b).min(idx_nr);
             let safe_to_free_chunk = min_idx >> CHUNK_SHIFT;
             while last_freed_chunk < safe_to_free_chunk {
-                states[last_freed_chunk] = Vec::new(); // Instantly frees memory
+                scores[last_freed_chunk] = Vec::new();
+                weights[last_freed_chunk] = Vec::new();
                 last_freed_chunk += 1;
             }
 
-            let state_a = if idx_a < len {
-                states[idx_a >> CHUNK_SHIFT][idx_a & CHUNK_MASK]
+            let score_a = if idx_a < len {
+                scores[idx_a >> CHUNK_SHIFT][idx_a & CHUNK_MASK]
             } else {
-                (u128::MAX, 0)
+                u128::MAX
             };
-            let state_b = if idx_b < len {
-                states[idx_b >> CHUNK_SHIFT][idx_b & CHUNK_MASK]
+            let score_b = if idx_b < len {
+                scores[idx_b >> CHUNK_SHIFT][idx_b & CHUNK_MASK]
             } else {
-                (u128::MAX, 0)
+                u128::MAX
             };
-            let state_nr = if idx_nr < len {
-                states[idx_nr >> CHUNK_SHIFT][idx_nr & CHUNK_MASK]
+            let score_nr = if idx_nr < len {
+                scores[idx_nr >> CHUNK_SHIFT][idx_nr & CHUNK_MASK]
             } else {
-                (u128::MAX, 0)
+                u128::MAX
             };
 
             let val_a = if idx_a < len {
-                state_a.0 + delta_a
+                score_a + delta_a
             } else {
                 u128::MAX
             };
             let val_b = if idx_b < len {
-                state_b.0 + delta_b
+                score_b + delta_b
             } else {
                 u128::MAX
             };
             let val_nr = if idx_nr < len {
-                state_nr.0 + delta_nr
+                score_nr + delta_nr
             } else {
                 u128::MAX
             };
@@ -149,27 +171,33 @@ impl DpSimulator {
             let mut w = 0;
 
             if val_a == min_val {
-                w += state_a.1;
+                w += weights[idx_a >> CHUNK_SHIFT][idx_a & CHUNK_MASK];
                 idx_a += 1;
             }
             if val_b == min_val {
-                w += state_b.1;
+                w += weights[idx_b >> CHUNK_SHIFT][idx_b & CHUNK_MASK];
                 idx_b += 1;
             }
             if val_nr == min_val {
-                w += state_nr.1;
+                w += weights[idx_nr >> CHUNK_SHIFT][idx_nr & CHUNK_MASK];
                 idx_nr += 1;
             }
 
-            if next_states[current_chunk].len() == CHUNK_SIZE {
-                next_states.push(Vec::with_capacity(CHUNK_SIZE));
+            if next_scores[current_chunk].len() == CHUNK_SIZE {
+                next_scores.push(Vec::with_capacity(CHUNK_SIZE));
+                next_weights.push(Vec::with_capacity(CHUNK_SIZE));
                 current_chunk += 1;
             }
-            next_states[current_chunk].push((min_val, w));
+            next_scores[current_chunk].push(min_val);
+            next_weights[current_chunk].push(w);
             next_len += 1;
         }
 
-        (next_states, next_len)
+        States {
+            scores: next_scores,
+            weights: next_weights,
+            total_states: next_len,
+        }
     }
 
     pub fn simulate_forward(
@@ -179,11 +207,12 @@ impl DpSimulator {
         term: &Terminal,
         global_start_time: Instant,
         match_offset: usize,
-    ) -> (Vec<Vec<(u128, u64)>>, usize) {
+    ) -> States {
         let phase_start = Instant::now();
         let total_matches = matches.len() + match_offset;
         let mut total_states = 1;
-        let mut states: Vec<Vec<(u128, u64)>> = vec![vec![(branch_initial_state.score, 1)]];
+        let mut scores: Vec<Vec<u128>> = vec![vec![branch_initial_state.score]];
+        let mut weights: Vec<Vec<u64>> = vec![vec![1]];
 
         if term.interactive {
             draw_progress(
@@ -199,9 +228,10 @@ impl DpSimulator {
         }
 
         for (idx, &(a, b)) in matches.iter().enumerate() {
-            let (next_states, next_len) = self.process_next_match(states, total_states, a, b);
-            states = next_states;
-            total_states = next_len;
+            let states = self.process_next_match(scores, weights, total_states, a, b);
+            scores = states.scores;
+            weights = states.weights;
+            total_states = states.total_states;
 
             if term.interactive {
                 draw_progress(
@@ -217,20 +247,23 @@ impl DpSimulator {
             }
         }
 
-        (states, total_states)
+        States {
+            scores,
+            weights,
+            total_states,
+        }
     }
 
     pub fn classify_states_parallel(
         &self,
-        states: Vec<Vec<(u128, u64)>>,
-        total_states: usize,
+        states: States,
         term: &Terminal,
         global_start_time: Instant,
     ) -> Counts {
         let num_threads = determine_num_threads();
-        // Wrap the chunked states in a thread-safe Iterator
-        // Using into_iter() means chunks are consumed and their memory is instantly freed when a thread is done with them.
-        let chunk_iter = Arc::new(Mutex::new(states.into_iter()));
+        let total_states = states.total_states;
+        let chunk_pairs = states.scores.into_iter().zip(states.weights);
+        let chunk_iter = Arc::new(Mutex::new(chunk_pairs));
         let states_done = Arc::new(AtomicUsize::new(0));
         let mut handles = Vec::with_capacity(num_threads);
 
@@ -249,15 +282,17 @@ impl DpSimulator {
                         iter.next()
                     };
 
-                    let chunk = match chunk_opt {
+                    let (score_chunk, weight_chunk) = match chunk_opt {
                         Some(c) => c,
                         None => break, // No more chunks, thread can exit
                     };
 
-                    let chunk_len = chunk.len();
+                    let chunk_len = score_chunk.len();
 
                     // Classify every state in the chunk
-                    for (score, w) in chunk {
+                    for i in 0..chunk_len {
+                        let score = score_chunk[i];
+                        let w = weight_chunk[i];
                         let state = StandingState { score };
                         let mut leaf = Counts::default();
                         ranker.classify(&state, &mut leaf);
@@ -323,11 +358,11 @@ impl DpSimulator {
             "{}{}{} ==========",
             term.colors.cyan, branch_name, term.colors.reset
         );
-        let (states, total_states) =
+        let states =
             self.simulate_forward(branch_initial_state, matches, term, global_start_time, 1);
         // Print a newline so the Simulating Progress bar is saved and Classifying gets a fresh line
         println!();
-        self.classify_states_parallel(states, total_states, term, global_start_time)
+        self.classify_states_parallel(states, term, global_start_time)
     }
 
     pub fn run(
