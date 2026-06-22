@@ -23,7 +23,7 @@ pub fn estimate_dp_cost(d: usize, base: u64) -> (f64, f64) {
         let diff = d as f64 - 18.0;
         let additional_ram_buffer = 1.2725;
         let ram_mb = 3_480.0 * 2.168_f64.powf(diff) * additional_ram_buffer;
-        let build_time_s = 10.0 * 2.166_f64.powf(diff);
+        let build_time_s = 9.4 * 2.166_f64.powf(diff);
         let classify_time_s = 6.1 * 2.166_f64.powf(diff);
         let total_time_s = build_time_s + classify_time_s * time_scale_factor;
 
@@ -36,7 +36,7 @@ pub fn estimate_dp_cost(d: usize, base: u64) -> (f64, f64) {
         let diff = d as f64 - 40.0;
         let additional_ram_buffer = 1.15;
         let ram_mb = 1_435.0 * 1.222_f64.powf(diff) * additional_ram_buffer;
-        let build_time_s = 5.9 * 1.242_f64.powf(diff);
+        let build_time_s = 5.6 * 1.242_f64.powf(diff);
         let classify_time_s = 1.8 * 1.242_f64.powf(diff);
         let total_time_s = build_time_s + classify_time_s * time_scale_factor;
 

@@ -100,10 +100,13 @@ impl DpSimulator {
 
         let expected_len = (total_states * 15) / 10;
         let expected_chunks = (expected_len / CHUNK_SIZE) + 1;
+
         let mut next_scores = Vec::with_capacity(expected_chunks);
         let mut next_weights = Vec::with_capacity(expected_chunks);
-        next_scores.push(Vec::with_capacity(CHUNK_SIZE));
-        next_weights.push(Vec::with_capacity(CHUNK_SIZE));
+
+        // Local stack buffers for writes to bypass double-indirection
+        let mut curr_scores = Vec::with_capacity(CHUNK_SIZE);
+        let mut curr_weights = Vec::with_capacity(CHUNK_SIZE);
 
         let delta_a = WIN_SCORE_DELTA << (a * TEAM_BITS);
         let delta_b = WIN_SCORE_DELTA << (b * TEAM_BITS);
@@ -121,27 +124,55 @@ impl DpSimulator {
             total_states
         };
 
+        // Separate variables for chunk and local indices to help LLVM elide bounds checks
+        let mut chunk_a = 0;
+        let mut local_a = 0;
+        let mut chunk_b = 0;
+        let mut local_b = 0;
+        let mut chunk_nr = idx_nr >> CHUNK_SHIFT;
+        let mut local_nr = idx_nr & CHUNK_MASK;
+
         let len = total_states;
         let mut next_len = 0;
-        let mut current_chunk = 0;
         let mut last_freed_chunk = 0;
 
         // Cache the initial values before the loop
         let mut val_a = if idx_a < len {
-            scores[0][0] + delta_a
+            scores[chunk_a][local_a] + delta_a
         } else {
             u128::MAX
         };
         let mut val_b = if idx_b < len {
-            scores[0][0] + delta_b
+            scores[chunk_b][local_b] + delta_b
         } else {
             u128::MAX
         };
         let mut val_nr = if idx_nr < len {
-            scores[0][0] + delta_nr
+            scores[chunk_nr][local_nr] + delta_nr
         } else {
             u128::MAX
         };
+
+        // Define the macro to process the winning stream
+        macro_rules! advance_stream {
+            ($val:expr, $idx:ident, $local:ident, $chunk:ident, $w:ident, $min_val:expr, $delta:expr) => {
+                if $val == $min_val {
+                    $w += weights[$chunk][$local];
+                    $idx += 1;
+                    $local += 1;
+                    // Help LLVM elide bounds checks by resetting local counter
+                    if $local == CHUNK_SIZE {
+                        $chunk += 1;
+                        $local = 0;
+                    }
+                    $val = if $idx < len {
+                        scores[$chunk][$local] + $delta
+                    } else {
+                        u128::MAX
+                    };
+                }
+            };
+        }
 
         while idx_a < len || idx_b < len || idx_nr < len {
             let min_idx = idx_a.min(idx_b).min(idx_nr);
@@ -157,45 +188,28 @@ impl DpSimulator {
             let mut w = 0;
 
             // Only fetch from memory and recalculate if this specific stream won
-            if val_a == min_val {
-                w += weights[idx_a >> CHUNK_SHIFT][idx_a & CHUNK_MASK];
-                idx_a += 1;
-                val_a = if idx_a < len {
-                    scores[idx_a >> CHUNK_SHIFT][idx_a & CHUNK_MASK] + delta_a
-                } else {
-                    u128::MAX
-                };
+            // Call the macro for each stream
+            advance_stream!(val_a, idx_a, local_a, chunk_a, w, min_val, delta_a);
+            advance_stream!(val_b, idx_b, local_b, chunk_b, w, min_val, delta_b);
+            advance_stream!(val_nr, idx_nr, local_nr, chunk_nr, w, min_val, delta_nr);
+
+            // Write to local buffers, completely avoiding outer Vec bounds checks
+            if curr_scores.len() == CHUNK_SIZE {
+                next_scores.push(curr_scores);
+                next_weights.push(curr_weights);
+                curr_scores = Vec::with_capacity(CHUNK_SIZE);
+                curr_weights = Vec::with_capacity(CHUNK_SIZE);
             }
 
-            if val_b == min_val {
-                w += weights[idx_b >> CHUNK_SHIFT][idx_b & CHUNK_MASK];
-                idx_b += 1;
-                val_b = if idx_b < len {
-                    scores[idx_b >> CHUNK_SHIFT][idx_b & CHUNK_MASK] + delta_b
-                } else {
-                    u128::MAX
-                };
-            }
-
-            if val_nr == min_val {
-                w += weights[idx_nr >> CHUNK_SHIFT][idx_nr & CHUNK_MASK];
-                idx_nr += 1;
-                val_nr = if idx_nr < len {
-                    scores[idx_nr >> CHUNK_SHIFT][idx_nr & CHUNK_MASK] + delta_nr
-                } else {
-                    u128::MAX
-                };
-            }
-
-            if next_scores[current_chunk].len() == CHUNK_SIZE {
-                next_scores.push(Vec::with_capacity(CHUNK_SIZE));
-                next_weights.push(Vec::with_capacity(CHUNK_SIZE));
-                current_chunk += 1;
-            }
-
-            next_scores[current_chunk].push(min_val);
-            next_weights[current_chunk].push(w);
+            curr_scores.push(min_val);
+            curr_weights.push(w);
             next_len += 1;
+        }
+
+        // Push any remaining elements to the outer Vec
+        if !curr_scores.is_empty() {
+            next_scores.push(curr_scores);
+            next_weights.push(curr_weights);
         }
 
         States {
